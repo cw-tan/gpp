@@ -1,10 +1,10 @@
 import numpy as np
 import torch
-from linear_operator.operators import IdentityLinearOperator, DiagLinearOperator, LinearOperator, TriangularLinearOperator, CholLinearOperator
+from linear_operator.operators import IdentityLinearOperator, DiagLinearOperator, LinearOperator, TriangularLinearOperator
 from linear_operator import settings
 
 import time
-from linear_operator.utils import linear_cg, stable_qr
+from linear_operator.utils import stable_qr
 
 def kernel(x1, x2, noise=1, l=1):
   """
