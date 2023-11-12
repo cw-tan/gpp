@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from linear_operator.operators import IdentityLinearOperator, DiagLinearOperator, LinearOperator, TriangularLinearOperator
+from linear_operator.operators import IdentityLinearOperator, DiagLinearOperator, LinearOperator, TriangularLinearOperator, ConstantDiagLinearOperator
 from linear_operator import settings
 
 import time
@@ -31,7 +31,7 @@ class SparseGaussianProcess():
     """
     TODO: device manipulation
     """
-    def __init__(self, descriptor_dim, update_mode='QR'):
+    def __init__(self, descriptor_dim, invert_mode='QR'):
         """
         
         """
@@ -43,11 +43,14 @@ class SparseGaussianProcess():
         # hyperparameters
         self.kernel_noise = torch.tensor([1], dtype=torch.float64)
         self.kernel_length = torch.tensor([1], dtype=torch.float64)
+        self.kernel_hyperparameters = torch.tensor([1, 1], dtype=torch.float64)
         self.model_noise = torch.tensor([0.01], dtype=torch.float64)
+        
         self.optimizer = torch.optim.Rprop([self.model_noise, self.kernel_noise, self.kernel_length])
 
-        self.update_mode = update_mode
+        self.invert_mode = invert_mode
         # trained model parameters (precomputed during model updates for faster prediction)
+        self.Ksf = None
         self.Lambda_inv = None
         self.Kss_inv = None
         self.Sigma = None
@@ -68,20 +71,22 @@ class SparseGaussianProcess():
         self.sparse_descriptors = torch.cat((self.sparse_descriptors, torch.atleast_2d(x_sparse)), dim=1)
         self.full_descriptors = torch.cat((self.full_descriptors, torch.atleast_2d(x_train)), dim=1)
         self.training_outputs = torch.cat((self.training_outputs, y_train))
+        self.Ksf = kernel(self.sparse_descriptors, self.full_descriptors,
+                          self.kernel_noise, self.kernel_length)
         self.__update_Sigma_alpha()
 
     def __update_Sigma_alpha(self):
         Kff = kernel(self.full_descriptors, self.full_descriptors,
-                             self.kernel_noise, self.kernel_length)
-        Ksf = kernel(self.sparse_descriptors, self.full_descriptors,
-                             self.kernel_noise, self.kernel_length)
+                     self.kernel_noise, self.kernel_length)
         Kss = kernel(self.sparse_descriptors, self.sparse_descriptors,
-                             self.kernel_noise, self.kernel_length)
-        self.Lambda_inv = self.model_noise.pow(-2) * IdentityLinearOperator(self.full_descriptors.shape[1])
-    
+                     self.kernel_noise, self.kernel_length)
+        self.Lambda_inv = ConstantDiagLinearOperator(self.model_noise.pow(-2), self.full_descriptors.shape[1])
+
         print('cond(Kss) = {:.4g}'.format(torch.linalg.cond(Kss).item()))
 
         Kss = Kss + torch.eye(self.sparse_descriptors.shape[1]) * 1e-8
+
+        print('cond(Kss + jitter) = {:.4g}'.format(torch.linalg.cond(Kss).item()))
 
         start = time.time()
         Lss = torch.linalg.cholesky(Kss)
@@ -91,30 +96,124 @@ class SparseGaussianProcess():
         print('Cholesky Kss: {:.5g}s'.format(end - start))
 
         start = time.time()
-        match self.update_mode:
+        match self.invert_mode:
             case 'N':  # use 'Normal Equations' method, i.e. direct Cholesky inverse (needs jitter!)
-                Sigma_inv = Kss + Ksf @ self.Lambda_inv @ Ksf.T
+                Sigma_inv = Kss + self.Ksf @ self.Lambda_inv @ self.Ksf.T
                 Sigma_inv = Sigma_inv + torch.eye(self.sparse_descriptors.shape[1]) * 1e-8
                 L_Sigma_inv = torch.linalg.cholesky(Sigma_inv)
                 self.Sigma = torch.cholesky_inverse(L_Sigma_inv)
                 print('cond(Σ_inv) = {:.4g}'.format(torch.linalg.cond(Sigma_inv).item()))
             case 'V':  # V method (mostly stable)
-                V = Ksf.T @ Lss_inv.T
+                V = self.Ksf.T @ Lss_inv.T
                 Gamma = IdentityLinearOperator(V.shape[1]) + V.T @ self.Lambda_inv @ V
                 L_Gamma_inv = Gamma.cholesky().inverse()
                 Gamma_inv = L_Gamma_inv.T @ L_Gamma_inv
                 self.Sigma = Lss_inv.T @ Gamma_inv @ Lss_inv
                 print('cond(Γ) = {:.4g}'.format(torch.linalg.cond(Gamma.to_dense()).item()))
             case 'QR':  # QR method (most stable)
-                B = torch.cat([self.Lambda_inv.sqrt() @ Ksf.T, Lss.T], dim=0)
+                B = torch.cat([self.Lambda_inv.sqrt() @ self.Ksf.T, Lss.T], dim=0)
                 Q, R = stable_qr(B)
                 R_inv = TriangularLinearOperator(R, upper=True).inverse()
+                self.R_inv = R_inv
                 self.Sigma = R_inv @ R_inv.T
         end = time.time()
         print('Inversion Time: {:.5g}s'.format(end - start))
-        self.alpha = self.Sigma @ Ksf @ self.Lambda_inv @ self.training_outputs 
+        self.alpha = self.Sigma @ self.Ksf @ self.Lambda_inv @ self.training_outputs
 
-    def get_predictions(self, x_test, mean_var=[True, True], mode='sor'):
+    def update_full_set(self, x_train, y_train):
+        """
+        Update full set without inverting entire updated covariance matrix.
+        """
+        self.full_descriptors = torch.cat((self.full_descriptors, torch.atleast_2d(x_train)), dim=1)
+        self.training_outputs = torch.cat((self.training_outputs, y_train))
+        self.Lambda_inv = ConstantDiagLinearOperator(self.model_noise.pow(-2), self.full_descriptors.shape[1])
+
+        Ksfprime = kernel(self.sparse_descriptors, torch.atleast_2d(x_train),
+                          self.kernel_noise, self.kernel_length)
+        self.Ksf = torch.cat([self.Ksf, Ksfprime], dim=1)
+
+        Sigma_prev = self.Sigma
+        Lambda_prime = ConstantDiagLinearOperator(self.model_noise.pow(2), torch.atleast_2d(x_train).shape[1])
+        to_invert = Lambda_prime + Ksfprime.T @ Sigma_prev @ Ksfprime  
+        print('cond(to_invert) = {:.4g}'.format(torch.linalg.cond(to_invert.to_dense()).item())) # check condition number
+        L_inv = to_invert.cholesky().inverse()
+        self.Sigma = Sigma_prev - Sigma_prev @ Ksfprime @ L_inv.T @ L_inv @ Ksfprime.T @ Sigma_prev        
+        self.alpha = self.Sigma @ self.Ksf @ self.Lambda_inv @ self.training_outputs
+
+    def update_sparse_set(self, x_sparse):
+        """
+        
+        """
+        Kssprime = kernel(self.sparse_descriptors, torch.atleast_2d(x_sparse),
+                          self.kernel_noise, self.kernel_length)
+        self.sparse_descriptors = torch.cat((self.sparse_descriptors, torch.atleast_2d(x_sparse)), dim=1)
+        Ksprimesprime = kernel(torch.atleast_2d(x_sparse), torch.atleast_2d(x_sparse),
+                               self.kernel_noise, self.kernel_length)
+        Kfsprime = kernel(self.full_descriptors, torch.atleast_2d(x_sparse),
+                          self.kernel_noise, self.kernel_length)
+
+        # update Kss_inv
+        Kss_inv_prev = self.Kss_inv
+
+        to_invert = Ksprimesprime - Kssprime.T @ Kss_inv_prev @ Kssprime
+        print('cond(to_invert) = {:.4g}'.format(torch.linalg.cond(to_invert).item()))
+        
+        to_invert = to_invert + torch.eye(to_invert.shape[0]) * 1e-8
+        print('cond(to_invert + jitter) = {:.4g}'.format(torch.linalg.cond(to_invert).item()))
+        
+        start = time.time()
+        L = torch.linalg.cholesky(to_invert)
+        L_inv = TriangularLinearOperator(L, upper=False).inverse()
+        D = L_inv.T @ L_inv
+        end = time.time()
+        print('Cholesky Ksprimesprime: {:.5g}s'.format(end - start))
+        
+        A = Kss_inv_prev + Kss_inv_prev @ Kssprime @ D @ Kssprime.T @ Kss_inv_prev
+        B = -1 * D @ Kssprime.T @ Kss_inv_prev
+        self.Kss_inv = A.cat_rows(B, D, generate_roots=False, generate_inv_roots=False)
+
+        # update Sigma
+        Sigma_prev = self.Sigma
+        B = Kssprime + self.Ksf @ self.Lambda_inv @ Kfsprime
+        D = Ksprimesprime + Kfsprime.T @ self.Lambda_inv @ Kfsprime
+
+        R_inv_B = self.R_inv.T @ B
+        
+        to_invert = D - R_inv_B.T @ R_inv_B
+        evals, evecs = torch.linalg.eigh(to_invert)
+        #print(evals)
+        
+        #aux = self.R_inv.T @ B
+        #aux = aux.T @ aux
+        #print(torch.max(torch.abs(aux - aux.T)))
+        #print(torch.max(torch.abs(B - C.T)))
+        print(torch.max(torch.abs(to_invert - to_invert.T)))
+        print('cond(to_invert) = {:.4g}'.format(torch.linalg.cond(to_invert).item()))
+        
+        #to_invert = to_invert + torch.eye(to_invert.shape[0]) * 1e-8
+        #print('cond(to_invert + jitter) = {:.4g}'.format(torch.linalg.cond(to_invert).item()))
+        
+        start = time.time()
+        #L = torch.linalg.cholesky(to_invert)
+        #L_inv = TriangularLinearOperator(L, upper=False).inverse()
+        #newD = L_inv.T @ L_inv
+        newD = torch.linalg.inv(to_invert)
+        end = time.time()
+        print('Cholesky newD: {:.5g}s'.format(end - start))
+
+        newA = Sigma_prev + Sigma_prev @ B @ newD @ B.T @ Sigma_prev
+        #newB = -1 * Sigma_prev @ B @ newD
+        #newC = -1 * newD @ C @ Sigma_prev
+
+        newB = -1 * newD @ B.T @ Sigma_prev
+        self.Sigma = newA.cat_rows(newB, newD, generate_roots=False, generate_inv_roots=False)
+        
+        self.Ksf = torch.cat([self.Ksf, Kfsprime.T], dim=0)
+        self.alpha = self.Sigma @ self.Ksf @ self.Lambda_inv @ self.training_outputs
+
+
+
+    def get_predictions(self, x_test, mean_var=[True, True], mode='dtc'):
         """
         Get predictions of GP model with a set of testing vectors.
 
@@ -142,11 +241,9 @@ class SparseGaussianProcess():
 
     def get_likelihood(self):
         # TODO: make Ksf a class attribute
-        Ksf = kernel(self.sparse_descriptors, self.full_descriptors,
-                     self.kernel_noise, self.kernel_length)
         fsize = self.full_descriptors.shape[1]
         fit_term = -0.5 * self.training_outputs.unsqueeze(0) @ self.Lambda_inv
-        fit_term = fit_term @ (self.training_outputs - Ksf.T @ self.alpha)
+        fit_term = fit_term @ (self.training_outputs - self.Ksf.T @ self.alpha)
         log_Xi_inv_det = self.Kss_inv.logdet() - self.Lambda_inv.logdet() - self.Sigma.logdet()
         return fit_term - 0.5 * log_Xi_inv_det - fsize * 0.5 * np.log(2 * np.pi)
 
