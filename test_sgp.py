@@ -12,14 +12,15 @@ L = 10
 x_test = torch.linspace(-L - 1, L + 1, 1000, dtype=torch.float64)
 
 
-SGP = SparseGaussianProcess(1, invert_mode='V')
+SGP = SparseGaussianProcess(1, invert_mode='QR')
 
 plt.plot(x_test, func(x_test), '-k', label=r'$f(x)$')
-x_train = L * (2 * torch.rand(200, dtype=torch.float64) - 1)
+x_train = L * (2 * torch.rand(300, dtype=torch.float64) - 1)
 y_train = func(x_train)
 
 # use 25 % of full training points as sparse points
-x_sparse = x_train[torch.randperm(len(x_train))[:(int(len(x_train) / 5))]]
+#x_sparse = x_train[torch.randperm(len(x_train))[:(int(len(x_train) / 1.2))]]
+x_sparse = L * (2 * torch.rand(30, dtype=torch.float64) - 1)
 #x_sparse[-1] = x_sparse[0] + 1e-7
 
 SGP.update_model(x_train, y_train, x_sparse)

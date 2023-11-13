@@ -84,14 +84,14 @@ class SparseGaussianProcess():
         noise = torch.clamp(self.model_noise, min=1e-8)  # to avoid NaNs during hyperparameter optimization
         self.Lambda_inv = ConstantDiagLinearOperator(noise.pow(-2), self.full_descriptors.shape[1])
 
-        print('cond(Kss) = {:.4g}'.format(torch.linalg.cond(Kss).item()))
         Kss = Kss + torch.eye(self.sparse_descriptors.shape[1]) * 1e-8
-        print('cond(Kss + jitter) = {:.4g}'.format(torch.linalg.cond(Kss).item()))
-
+ 
         start = time.time()
         Lss = torch.linalg.cholesky(Kss)  # M³/3 flops
         end = time.time()
         print('Cholesky factorize Kss: {:.5g}s'.format(end - start))
+
+        print('cond(Lss) = {:.4g}'.format(torch.linalg.cond(Lss).item()))
 
         # keep Kss in terms of its Cholesky decomposition (useful for enforcing matrix symmetry later)
         # results cached once an inversion is called on Kss or its Cholesky factors later on
@@ -99,32 +99,49 @@ class SparseGaussianProcess():
         # (likely an arbitrary choice in terms of performance, but may be important for future code readability)
         self.Kss = CholLinearOperator(Lss, upper=False)
  
+        invert_start = time.time()
         match self.invert_mode:
             case 'N':  # use 'Normal Equations' method, i.e. direct Cholesky inverse (very unstable)
                 Sigma_inv = Kss + self.Ksf @ self.Lambda_inv @ self.Ksf.T
-                Sigma_inv = Sigma_inv + torch.eye(self.sparse_descriptors.shape[1]) * 1e-8
+                Sigma_inv = Sigma_inv + torch.eye(self.sparse_descriptors.shape[1]) * 1  # large jitter!
+
+                #start = time.time()
                 L_Sigma_inv = torch.linalg.cholesky(Sigma_inv)
-                self.Sigma = torch.cholesky_inverse(L_Sigma_inv)
-                print('cond(Σ_inv) = {:.4g}'.format(torch.linalg.cond(Sigma_inv).item()))
-            case 'V':  # V method (mostly stable)
-                start = time.time()
+                #end = time.time()
+                #print('N method | Cholesky factorize: {:.5g}s'.format(end - start))
+
+                #start = time.time()
+                L_Sigma = TriangularLinearOperator(L_Sigma_inv, upper=False).inverse()
+                self.Sigma = L_Sigma.T @ L_Sigma
+                # self.Sigma = torch.cholesky_inverse(L_Sigma_inv)  marginally slower
+                #end = time.time()
+                #print('N method | Cholesky inverse: {:.5g}s'.format(end - start))
+                #print('N method | cond(L_Σ_inv) = {:.4g}'.format(torch.linalg.cond(L_Sigma_inv).item()))
+            case 'V':  # V method (relatively stable)
+                #start = time.time()
                 Lss_inv = self.Kss.cholesky().inverse()
-                end = time.time()
-                print('V method, Cholesky Kss_inv: {:.5g}s'.format(end - start))
+                #end = time.time()
+                #print('V method | get Lss_inv : {:.5g}s'.format(end - start))
 
                 V = self.Ksf.T @ Lss_inv.T
                 Lambda_inv_sqrt_V = self.Lambda_inv.sqrt() @ V
                 Gamma = IdentityLinearOperator(V.shape[1]) + Lambda_inv_sqrt_V.T @ Lambda_inv_sqrt_V
-                print('cond(Γ) = {:.4g}'.format(torch.linalg.cond(Gamma.to_dense()).item()))
 
-                start = time.time()
+                #start = time.time()
                 L_Gamma = torch.linalg.cholesky(Gamma.to_dense())
-                L_Gamma_inv = TriangularLinearOperator(L_Gamma).inverse()
-                # L_Gamma_inv = Gamma.cholesky().inverse()  # more expensive for whatever reason
-                end = time.time()
-                print('V method, Cholesky inverse: {:.5g}s'.format(end - start))
+                #L_Gamma = Gamma.cholesky()  # more expensive
+                #end = time.time()
+                #print('V method | Cholesky factorize: {:.5g}s'.format(end - start))
+                
+                #start = time.time()
+                aux = TriangularLinearOperator(L_Gamma, upper=False).inverse() @ Lss_inv
+                # the following fails - numerical instability induced by dense representation of Lss_inv
+                #aux = TriangularLinearOperator(L_Gamma, upper=False).inverse() @ Lss_inv.to_dense()
+                #aux = TriangularLinearOperator(L_Gamma, upper=False).solve_triangular(Lss_inv.to_dense(), upper=False)
+                #end = time.time()
+                #print('V method | Cholesky inverse: {:.5g}s'.format(end - start))
+                #print('V method | cond(L_Γ) = {:.4g}'.format(torch.linalg.cond(L_Gamma).item()))
 
-                aux = L_Gamma_inv @ Lss_inv
                 self.Sigma = aux.T @ aux
 
             case 'QR':  # QR method (most stable)
@@ -133,6 +150,10 @@ class SparseGaussianProcess():
                 R_inv = TriangularLinearOperator(R, upper=True).inverse()
                 self.R_inv = R_inv
                 self.Sigma = R_inv @ R_inv.T
+
+        invert_end = time.time()
+        #print('{} method | Total inversion time: {:.5g}s'.format(self.invert_mode, invert_end - invert_start))
+        #print('Σ symmetry check: Max(|Σ - Σ.T|) = {:.5g} '.format(torch.max(torch.abs((self.Sigma - self.Sigma.T).to_dense()))))
 
         self.alpha = self.Sigma @ self.Ksf @ self.Lambda_inv @ self.training_outputs
 
@@ -266,17 +287,15 @@ class SparseGaussianProcess():
             if mode == 'sor':  # quite nonsensical
                 var = torch.abs((Kst.T @ self.Sigma @ Kst).diag())
             elif mode == 'dtc':
-                
                 var = kernel(x_test, x_test,
                              self.kernel_noise, self.kernel_length)
-                
+
                 start = time.time()
-                Lss_inv = self.Kss.cholesky().inverse()
+                Lss_inv_Kst = self.Kss.cholesky(upper=False).solve(Kst)
+                #Lss_inv_Kst = self.Kss.cholesky(upper=False).inverse() @ Kst # more expensive
                 end = time.time()
-                print('DTC, Cholesky Kss_inv: {:.5g}s'.format(end - start))            
-                
-                Lss_inv_Kst = Lss_inv @ Kst
-                
+                print('DTC | Kss Cholesky solve: {:.5g}s'.format(end - start))   
+
                 var = var - Lss_inv_Kst.T @ Lss_inv_Kst
                 var = var + Kst.T @ self.Sigma @ Kst
                 var = torch.abs(var.diag())
