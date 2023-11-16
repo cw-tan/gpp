@@ -2,35 +2,47 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 
+import os
+import sys
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'source'))
+
 from sgp import SparseGaussianProcess
+
 
 def func(x):
   #return (torch.cos(0.5 * x) - 0.5 * torch.sin(2 * x) * torch.cos(x / 40)) * torch.exp(- 1e-4 * x* x)
-  return torch.cos(0.5*x) - 0.3 * x + 0.1 * np.exp(0.3 * x)
+  return torch.cos(0.5*x) - 0.3 * x + 0.1 * np.exp(0.3 * x) + 1e-2 * torch.rand(x.shape)
 
 L = 10
 x_test = torch.linspace(-L - 1, L + 1, 1000, dtype=torch.float64)
 
 
-SGP = SparseGaussianProcess(1, invert_mode='V')
+SGP = SparseGaussianProcess(1, invert_mode='QR')
 
 plt.plot(x_test, func(x_test), '-k', label=r'$f(x)$')
-x_train = L * (2 * torch.rand(100, dtype=torch.float64) - 1)
+x_train = L * (2 * torch.rand(20, dtype=torch.float64) - 1)
 y_train = func(x_train)
 
 # use 25 % of full training points as sparse points
 #x_sparse = x_train[torch.randperm(len(x_train))[:(int(len(x_train) / 1.2))]]
-x_sparse = L * (2 * torch.rand(30, dtype=torch.float64) - 1)
+x_sparse = L * (2 * torch.rand(17, dtype=torch.float64) - 1)
 #x_sparse[-1] = x_sparse[0] + 1e-7
 
 SGP.update_model(x_train, y_train, x_sparse)
 
-#x_train = L * (2 * torch.rand(20, dtype=torch.float64) - 1)
-#y_train = func(x_train)
-#SGP.update_full_set(x_train, y_train)
+x_train = L * (2 * torch.rand(12, dtype=torch.float64) - 1)
+y_train = func(x_train)
+SGP.update_full_set(x_train, y_train)
 
+x_train = L * (2 * torch.rand(24, dtype=torch.float64) - 1)
+y_train = func(x_train)
+SGP.update_full_set(x_train, y_train)
 
-x_sparse_new = L * (2 * torch.rand(20, dtype=torch.float64) - 1)
+x_train = L * (2 * torch.rand(37, dtype=torch.float64) - 1)
+y_train = func(x_train)
+SGP.update_full_set(x_train, y_train)
+
+x_sparse_new = L * (2 * torch.rand(15, dtype=torch.float64) - 1)
 SGP.update_sparse_set(x_sparse_new)
 
 steps = SGP.optimize_hyperparameters(relax_kernel_length=False)
