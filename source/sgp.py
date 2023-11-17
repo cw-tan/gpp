@@ -19,7 +19,10 @@ from lbfgsnew import LBFGSNew
 
 softplus = torch.nn.Softplus()
 
-# TODO: make kernel a model child and have it carry its own hyperparameters
+# TODOs: 
+# 1. make kernel a model child and have it carry its own hyperparameters
+# 2. implement low-rank update of U @ U.T decomposition
+# 3. hyperparameter optimization based on KL divergence/ELBO
 
 def kernel(x1, x2, noise=1, l=1, diag=False):
       """
@@ -154,16 +157,16 @@ class SparseGaussianProcess():
         Lambda_prime = self.__get_Lambda_inv(torch.atleast_2d(x_train), update=True).inverse()
         to_invert = Lambda_prime + Ksfprime.T @ self.Sigma @ Ksfprime
         L_to_invert = torch.linalg.cholesky(to_invert.to_dense())  # O(N'³)
-        L_inv = TriangularLinearOperator(L_to_invert).inverse()  # O(N'³)
 
-        B = Ksfprime @ L_inv.T  # O(MN'²)
-        B = self.Sigma.root.T @ B  # O(M²N')
-        # B is M × N'
-        start = time.time()  # TODO: the following scales as O(M³)
-        Uprime = root_decomposition(IdentityLinearOperator(B.shape[0]) - B @ B.T, method='cholesky').root
-        self.Sigma = RootLinearOperator(self.Sigma.root @ Uprime)
-        end = time.time()
-        print('Full set update | Preserve root: {:.5g}s'.format(end - start))
+        C = TriangularLinearOperator(L_to_invert).solve(Ksfprime.T @ self.Sigma.root)
+        I_minus_CCT = IdentityLinearOperator(C.shape[1]) - C.T @ C  # O(M²N')
+        # TODO: the following scales as O(M³)
+        # solution: custom rank-1 update (scales as O(M²)) 
+        #           applied N' times, overall # O(M²N'), i.e.
+        # B = TriangularLinearOperator(L_to_invert).solve(Ksfprime.T @ self.Sigma).T
+        # self.Sigma = lowrank_update_UUT(self.Sigma, B)
+        Uprime = root_decomposition(I_minus_CCT, method='cholesky').root  # O(M³)
+        self.Sigma = RootLinearOperator(self.Sigma.root @ Uprime)  # O(M³) matmul
 
         self.Lambda_inv = DiagLinearOperator(torch.cat([self.Lambda_inv.diagonal(),
                                                         Lambda_prime.inverse().diagonal()]))
@@ -199,7 +202,6 @@ class SparseGaussianProcess():
         C = Ksprimesprime + Lambda_inv_root_Ksfp.T @ Lambda_inv_root_Ksfp  # O(N²M')
         aux = B.T @ self.Sigma.root  # O(M²M')
         to_invert = C - aux @ aux.T  # O(MM'²)
-        # use symeig to preserve U @ U.T shape for assembly
         U_Psi = root_inv_decomposition(to_invert, method='symeig').root  # O(M'³)
         upper_right = B @ U_Psi  # O(MM'²)
         upper_right = -1 * self.Sigma @ upper_right  # O(M²M')
@@ -213,7 +215,7 @@ class SparseGaussianProcess():
         self.alpha = self.Lambda_inv @ self.training_outputs  # O(N²)
         self.alpha = self.Ksf @ self.alpha  # O(MN)
         self.alpha = self.Sigma @ self.alpha  # O(M²)
- 
+
     def get_predictions(self, x_test, mean_var=[True, True]):
         """
         Get predictions of GP model with a set of testing vectors.
