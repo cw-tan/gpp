@@ -110,49 +110,25 @@ class SparseGaussianProcess():
         invert_start = time.time()
         match self.invert_mode:
             case 'N':  # use 'Normal Equations' method, i.e. direct Cholesky inverse (very unstable)
-                Sigma_inv = Kss + self.Ksf @ self.Lambda_inv @ self.Ksf.T
+                Sigma_inv = Kss + self.Ksf @ self.Lambda_inv @ self.Ksf.T  # O(M²N)
                 Sigma_inv = Sigma_inv + torch.eye(self.sparse_descriptors.shape[1]) * 1  # large jitter!
-
-                #start = time.time()
-                L_Sigma_inv = torch.linalg.cholesky(Sigma_inv)
-                #end = time.time()
-                #print('N method | Cholesky factorize: {:.5g}s'.format(end - start))
-
-                #start = time.time()
-                self.U_Sigma = TriangularLinearOperator(L_Sigma_inv, upper=False).inverse().T
-                #end = time.time()
-                #print('N method | Cholesky inverse: {:.5g}s'.format(end - start))
-
+                L_Sigma_inv = torch.linalg.cholesky(Sigma_inv)  # O(M³)
+                self.U_Sigma = TriangularLinearOperator(L_Sigma_inv, upper=False).inverse().T  # O(M³)
                 #print('N method | cond(L_Σ_inv) = {:.4g}'.format(torch.linalg.cond(L_Sigma_inv).item()))
             case 'V':  # usually stable, sometimes breaks during hyperparameter optimization
-                #start = time.time()
-                Lss_inv = self.Kss.cholesky().inverse()
-                #end = time.time()
-                #print('V method | get Lss_inv : {:.5g}s'.format(end - start))
-
-                V = self.Ksf.T @ Lss_inv.T
-                Lambda_inv_sqrt_V = self.Lambda_inv.sqrt() @ V
-                Gamma = IdentityLinearOperator(V.shape[1]) + Lambda_inv_sqrt_V.T @ Lambda_inv_sqrt_V
-
-                #start = time.time()
-                L_Gamma = torch.linalg.cholesky(Gamma.to_dense())
-                #end = time.time()
-                #print('V method | Cholesky factorize Γ: {:.5g}s'.format(end - start))
-                
-                #start = time.time()
-                U_Sigma = (TriangularLinearOperator(L_Gamma, upper=False).inverse() @ Lss_inv).T
+                Lss_inv = self.Kss.cholesky().inverse()  # O(M³)
+                V = self.Ksf.T @ Lss_inv.T  # O(M²N)
+                Lambda_inv_sqrt_V = self.Lambda_inv.sqrt() @ V  # O(MN) since Lambda_inv is diagonal
+                Gamma = IdentityLinearOperator(V.shape[1]) + Lambda_inv_sqrt_V.T @ Lambda_inv_sqrt_V  # O(M²N)
+                L_Gamma = torch.linalg.cholesky(Gamma.to_dense())  # O(M³)
+                U_Sigma = (TriangularLinearOperator(L_Gamma, upper=False).inverse() @ Lss_inv).T  # O(M³)
                 self.Sigma = RootLinearOperator(U_Sigma)
-                #end = time.time()
-                #print('V method | Cholesky inverse: {:.5g}s'.format(end - start))
-
                 #print('V method | cond(L_Γ) = {:.4g}'.format(torch.linalg.cond(L_Gamma).item()))
-  
             case 'QR':  # very stable
                 B = torch.cat([self.Lambda_inv.sqrt() @ self.Ksf.T, Lss.T], dim=0)
                 Q, R = stable_qr(B)
-                U_Sigma = TriangularLinearOperator(R, upper=True).inverse()
+                U_Sigma = TriangularLinearOperator(R, upper=True).inverse()  # O(M³)
                 self.Sigma = RootLinearOperator(U_Sigma)
-
         invert_end = time.time()
         #print('{} method | Total inversion time: {:.5g}s'.format(self.sigma_mode, invert_end - invert_start))
 
@@ -228,7 +204,7 @@ class SparseGaussianProcess():
         upper_right = B @ U_Psi  # O(MM'²)
         upper_right = -1 * self.Sigma @ upper_right  # O(M²M')
         U_Sigma_upper = torch.cat([self.Sigma.root.to_dense(), upper_right], dim=1)
-        U_Sigma_lower = torch.cat([torch.zeros(upper_right.T.shape), U_Psi.to_dense()], dim=1)
+        U_Sigma_lower = torch.cat([torch.zeros((U_Psi.shape[0], self.Sigma.root.shape[1])), U_Psi.to_dense()], dim=1)
         U_Sigma = torch.cat([U_Sigma_upper, U_Sigma_lower], dim=0)
         self.Sigma = RootLinearOperator(U_Sigma)
 
@@ -348,4 +324,3 @@ class SparseGaussianProcess():
                 Lambda_diag = Kff - aux.pow(2).sum(dim=0)
                 Lambda_diag = Lambda_diag + noise.pow(2).expand(size)
                 return DiagLinearOperator(Lambda_diag).inverse()
-            
