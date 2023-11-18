@@ -17,39 +17,43 @@ L = 10
 x_test = torch.linspace(-L - 1, L + 1, 1000, dtype=torch.float64)
 
 
-SGP = SparseGaussianProcess(1, invert_mode='QR', variance_mode='dtc')
+SGP = SparseGaussianProcess(1, invert_mode='qr', variance_mode='dtc')
 
 plt.plot(x_test, func(x_test), '-k', label=r'$f(x)$')
-x_train = L * (2 * torch.rand(70, dtype=torch.float64) - 1)
+x_train = L * (2 * torch.rand(80, dtype=torch.float64) - 1)
 y_train = func(x_train)
 plt.plot(x_train, y_train, 'ko')
 
 
-x_sparse = L * (2 * torch.rand(20, dtype=torch.float64) - 1)
+x_sparse = L * (2 * torch.rand(50, dtype=torch.float64) - 1)
 
 SGP.update_model(x_train, y_train, x_sparse)
 
-x_train = L * (2 * torch.rand(30, dtype=torch.float64) - 1)
-y_train = func(x_train)
-SGP.update_full_set(x_train, y_train)
+for i in range(1):
+    x_train = L * (2 * torch.rand(30, dtype=torch.float64) - 1)
+    y_train = func(x_train)
+    SGP.update_full_set(x_train, y_train)
 
-"""
-x_train = L * (2 * torch.rand(12, dtype=torch.float64) - 1)
-y_train = func(x_train)
-SGP.update_full_set(x_train, y_train)
+    x_sparse_new = L * (2 * torch.rand(15, dtype=torch.float64) - 1)
+    SGP.update_sparse_set(x_sparse_new)
 
-x_train = L * (2 * torch.rand(24, dtype=torch.float64) - 1)
-y_train = func(x_train)
-SGP.update_full_set(x_train, y_train)
+    x_train = L * (2 * torch.rand(12, dtype=torch.float64) - 1)
+    y_train = func(x_train)
+    SGP.update_full_set(x_train, y_train)
+
+    x_sparse_new = L * (2 * torch.rand(15, dtype=torch.float64) - 1)
+    SGP.update_sparse_set(x_sparse_new)
+
+    x_train = L * (2 * torch.rand(24, dtype=torch.float64) - 1)
+    y_train = func(x_train)
+    SGP.update_full_set(x_train, y_train)
+
+    x_sparse_new = L * (2 * torch.rand(15, dtype=torch.float64) - 1)
+    SGP.update_sparse_set(x_sparse_new)
 
 
-
-x_sparse_new = L * (2 * torch.rand(15, dtype=torch.float64) - 1)
-SGP.update_sparse_set(x_sparse_new)
-"""
-
-#steps = SGP.optimize_hyperparameters(relax_kernel_length=False)
-#print(steps)
+steps = SGP.optimize_hyperparameters(relax_kernel_length=False)
+print(steps)
 
 
 
