@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from linear_operator.operators import IdentityLinearOperator, ConstantDiagLinearOperator,\
+from linear_operator.operators import IdentityLinearOperator, ConstantDiagLinearOperator, \
                                       DiagLinearOperator, TriangularLinearOperator, \
                                       RootLinearOperator
 from linear_operator import settings, root_decomposition, root_inv_decomposition
@@ -18,12 +18,13 @@ from lbfgsnew import LBFGSNew
 softplus = torch.nn.Softplus()
 
 # TODOs:
-# 1. make kernel a model child and have it carry its own hyperparameters
-# 2. separate outputscale for kernels with other kernel hyperparameters
-# 3. implement low-rank update of U @ U.T decomposition
-# 4. hyperparameter optimization based on KL divergence/ELBO
-# 5. logging for hyperparameter optimization
-# 6. not important - set correct behavior for uninitialized model
+# 1. replace self.Sigma with self.R_Sigma
+# 2. add test for equivalence of update order
+# 3. make kernel a model child and have it carry its own hyperparameters
+# 4. centralize model update interface (instead of separate sparse and full set updates)
+# 5. hyperparameter optimization based on KL divergence/ELBO
+# 6. logging for hyperparameter optimization
+# 7. not important - set correct behavior for uninitialized model
 
 
 def kernel(x1, x2, lengthscale, diag=False):
@@ -191,14 +192,15 @@ class SparseGaussianProcess():
             case 'qr':  # QR method (most stable)
                 B = torch.cat([self.Lambda_inv.sqrt() @ Ksf.T, self.Lss.T], dim=0)  # (N + M) by M
                 _, R = stable_qr(B)  # O(M²N + M³)
-                U_Sigma = torch.linalg.solve_triangular(R, torch.eye(R.shape[0], dtype=torch.float64), upper=True)  # O(M³)
+                U_Sigma = torch.linalg.solve_triangular(R, torch.eye(R.shape[0], dtype=torch.float64),
+                                                        upper=True)  # O(M³)
                 #print('QR method | cond(R) = {:.4g}'.format(torch.linalg.cond(R).item()))
         invert_end = time.time()
         print('{} method | Total inversion time: {:.5g}s'.format(self.invert_mode, invert_end - invert_start))
 
         self.Sigma = RootLinearOperator(U_Sigma)
         # compute α by doing matrix-vector multiplications first
-        self.alpha = self.Lambda_inv @ self.training_outputs  # O(N²)
+        self.alpha = self.Lambda_inv @ self.training_outputs  # O(N) since Λ⁻¹ is diagonal
         self.alpha = Ksf @ self.alpha  # O(MN)
         self.alpha = self.Sigma @ self.alpha  # O(M²)
 
@@ -230,7 +232,7 @@ class SparseGaussianProcess():
         self.Lambda_inv = DiagLinearOperator(torch.cat([self.Lambda_inv.diagonal(),
                                                         Lambda_prime.inverse().diagonal()]))
         # compute α by doing matrix-vector multiplications first
-        self.alpha = self.Lambda_inv @ self.training_outputs  # O(N²)
+        self.alpha = self.Lambda_inv @ self.training_outputs  # O(N) since Λ⁻¹ is diagonal
         self.alpha = Ksf @ self.alpha  # O(MN)
         self.alpha = self.Sigma @ self.alpha  # O(M²)
 
@@ -285,7 +287,7 @@ class SparseGaussianProcess():
         U_Sigma = torch.cat([U_Sigma_upper, U_Sigma_lower], dim=0)
         self.Sigma = RootLinearOperator(U_Sigma)
 
-        self.alpha = self.Lambda_inv @ self.training_outputs  # O(N²)
+        self.alpha = self.Lambda_inv @ self.training_outputs  # O(N) since Λ⁻¹ is diagonal
         self.alpha = outputscale * self.Ksf @ self.alpha  # O(MN)
         self.alpha = self.Sigma @ self.alpha  # O(M²)
 
