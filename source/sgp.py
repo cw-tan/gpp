@@ -13,14 +13,16 @@ sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lbfgs'
 from lbfgsnew import LBFGSNew
 
 
-# TODOs:
-# 1. add test for equivalence of update order
-# 2. centralize model update interface (instead of separate sparse and full set updates)
-# 3. logging for hyperparameter optimization
-# 4. not important - set correct behavior for uninitialized model
+# Extensions:
+# 1. derivatives - need to redesign how SGP and Kernel classes interact?
+# 2. add more kernels?
 
+# Low priority aesthetic/user-friendliness TODOs:
+# 1. logging for hyperparameter optimization (print to stdout or log in file?)
+# 2. clean up docstrings
+# 3. verbosity for operations? timing etc? may clutter code though
 
-class SparseGaussianProcess():
+class SparseGaussianProcess(torch.nn.Module):
     """
     Supports the following SGP approximations
     - subset of regressors (SoR)
@@ -52,6 +54,7 @@ class SparseGaussianProcess():
             noise_range (list)      : noise hyperparameter range
             outputscale_range (list): outputscale hyperparameter range
         """
+        super().__init__()
         # model data (maybe data should be kernel attributes)
         self.full_descriptors = torch.empty((descriptor_dim, 0))
         self.sparse_descriptors = torch.empty((descriptor_dim, 0))
@@ -88,26 +91,39 @@ class SparseGaussianProcess():
         self.Sigma = None
         self.alpha = None
 
-    def update_model(self, x_train, y_train, x_sparse):
+    def update_model(self, x_train, y_train, x_sparse=None):
         """
-        Updates GP model with a set of training vectors, i.e. update the Cholesky decomposed L
+        Update SGP model with training data and/or inducing points. If the model is
+        empty (not initialized with training data), it is mandatory to provide
+        x_sparse. After initialization, there are three possible use modes:
+        1. only update full set            - set x_sparse=None, provide x_train, y_train
+        2. only update sparse set          - set x_train=None; provide x_sparse
+        3. update both full and sparse set - provide x_train, y_train, x_sparse
 
         Args:
-          x_train (torch.Tensor): d × m tensor where m is the number of x vectors and d is the
-                                  dimensionality of the x descriptor vectors
-          y_train (torch.Tensor): m-dimensional vector of training outputs corresponding to
-                                  the training inputs x_train
+          x_train (torch.Tensor) : d × m tensor where m is the number of x vectors and d is the
+                                   dimensionality of the x descriptor vectors
+          y_train (torch.Tensor) : m-dimensional vector of training outputs corresponding to
+                                   the training inputs x_train
+          x_sparse (torch.Tensor): d × m tensor where m is the number of x vectors and d is the
+                                   dimensionality of the x descriptor vectors
         """
-        self.full_descriptors = torch.cat((self.full_descriptors, x_train), dim=1)
-        self.training_outputs = torch.cat((self.training_outputs, y_train))
-        self.sparse_descriptors = torch.cat((self.sparse_descriptors, x_sparse), dim=1)
+        init = (self.full_descriptors.shape[1] == 0)  # no data -> initialize
 
-        # compute and keep covariances matrices without outputscale premultiplied
-        self.Ksf = self.kernel(self.sparse_descriptors, self.full_descriptors)
-        self.Kss = self.kernel(self.sparse_descriptors, self.sparse_descriptors)
-
-        self.__update_Lss_Sigma_alpha()
-        # TODO: use this function to unify initialization, full set and sparse set updates
+        if init:
+            assert x_sparse is not None, 'model is empty, x_sparse required for initialization'
+            self.full_descriptors = torch.cat((self.full_descriptors, x_train), dim=1)
+            self.training_outputs = torch.cat((self.training_outputs, y_train))
+            self.sparse_descriptors = torch.cat((self.sparse_descriptors, x_sparse), dim=1)
+            # compute and keep covariances matrices without outputscale premultiplied
+            self.Ksf = self.kernel(self.sparse_descriptors, self.full_descriptors)
+            self.Kss = self.kernel(self.sparse_descriptors, self.sparse_descriptors)
+            self.__update_Lss_Sigma_alpha()
+        else:  # updating sparse set first is more efficient as U_Sigma gets low rank update
+            if x_sparse is not None:
+                self.__update_sparse_set(x_sparse)
+            if x_train is not None:
+                self.__update_full_set(x_train, y_train)
 
     def __update_Lss_Sigma_alpha(self):
         """
@@ -153,9 +169,9 @@ class SparseGaussianProcess():
         self.alpha = Ksf @ self.alpha  # O(MN)
         self.alpha = self.Sigma @ self.alpha  # O(M²)
 
-    def update_full_set(self, x_train, y_train):
+    def __update_full_set(self, x_train, y_train):
         """
-        Update model with N' full points.
+        Update model with N' new full set data points (input and output).
         """
         self.full_descriptors = torch.cat((self.full_descriptors, torch.atleast_2d(x_train)), dim=1)
         self.training_outputs = torch.cat((self.training_outputs, y_train))
@@ -185,9 +201,9 @@ class SparseGaussianProcess():
         self.alpha = Ksf @ self.alpha  # O(MN)
         self.alpha = self.Sigma @ self.alpha  # O(M²)
 
-    def update_sparse_set(self, x_sparse):
+    def __update_sparse_set(self, x_sparse):
         """
-        Update model with M' new sparse points
+        Update model with M' new sparse set points.
         """
         # update covariance matrices
         outputscale = self.__constrained_hyperparameter('outputscale')
@@ -240,35 +256,47 @@ class SparseGaussianProcess():
         self.alpha = outputscale * self.Ksf @ self.alpha  # O(MN)
         self.alpha = self.Sigma @ self.alpha  # O(M²)
 
-    def get_predictions(self, x_test, mean_var=[True, True], include_noise=False):
+    def forward(self, x_test, mean_var=[True, True], include_noise=False):
         """
         Get predictions of GP model with a set of testing vectors.
 
         Args:
           x_test (torch.Tensor): d × p tensor where p is the number of x vectors and d is the
-                                  dimensionality of the x descriptor vectors
+                                 dimensionality of the x descriptor vectors
+          mean_var (bool list) : whether the function returns the mean or variance or both
+          include_noise (bool) : whether the noise is included in the variance
         """
-        # compute covariance matrix
-        outputscale = self.__constrained_hyperparameter('outputscale')
-        Kst = outputscale * self.kernel(self.sparse_descriptors, x_test)
         predictions = []
-        if mean_var[0]:
-            mean = Kst.T @ self.alpha
-            predictions.append(mean)
-        if mean_var[1]:
-            match self.sgp_mode:
-                case 'sor':  # quite nonsensical
-                    U_Sigma_Kst = self.Sigma.root.T @ Kst
-                    var = U_Sigma_Kst.pow(2).sum(dim=0)
-                case 'dtc' | 'fitc' | 'vfe':  # more sensible
-                    var = outputscale * self.kernel(x_test, x_test, diag=True)
-                    Lss_inv_Kst = torch.linalg.solve_triangular(self.Lss, Kst, upper=False)
-                    var = var - Lss_inv_Kst.pow(2).sum(dim=0)
-                    U_Sigma_T_Kst = self.Sigma.root.T @ Kst
-                    var = var + U_Sigma_T_Kst.pow(2).sum(dim=0)
-            if include_noise:
-                var = var + self.__constrained_hyperparameter('noise').pow(2)
-            predictions.append(torch.abs(var))
+        # handle possibility of inference with uninitialized model
+        if (self.full_descriptors.shape[1] == 0):
+            if mean_var[0]:
+                mean = torch.zeros(x_test.shape[1], dtype=torch.float64)
+                predictions.append(mean)
+            if mean_var[1]:
+                noise = self.__constrained_hyperparameter('noise')
+                var = noise.expand(x_test.shape[1])
+                predictions.append(var)
+        else:
+            # compute covariance matrix
+            outputscale = self.__constrained_hyperparameter('outputscale')
+            Kst = outputscale * self.kernel(self.sparse_descriptors, x_test)
+            if mean_var[0]:
+                mean = Kst.T @ self.alpha
+                predictions.append(mean)
+            if mean_var[1]:
+                match self.sgp_mode:
+                    case 'sor':  # quite nonsensical
+                        U_Sigma_Kst = self.Sigma.root.T @ Kst
+                        var = U_Sigma_Kst.pow(2).sum(dim=0)
+                    case 'dtc' | 'fitc' | 'vfe':  # more sensible
+                        var = outputscale * self.kernel(x_test, x_test, diag=True)
+                        Lss_inv_Kst = torch.linalg.solve_triangular(self.Lss, Kst, upper=False)
+                        var = var - Lss_inv_Kst.pow(2).sum(dim=0)
+                        U_Sigma_T_Kst = self.Sigma.root.T @ Kst
+                        var = var + U_Sigma_T_Kst.pow(2).sum(dim=0)
+                if include_noise:
+                    var = var + self.__constrained_hyperparameter('noise').pow(2)
+                predictions.append(torch.abs(var))
         return predictions
 
     def __compute_negative_log_marginal_likelihood(self):
@@ -312,6 +340,7 @@ class SparseGaussianProcess():
             relax_inducing_points (bool): whether to relax the inducing points or not
             relax_kernel_params (bool)  : whether to relax kernel hyperparameters
         """
+        # assemble hyperparameters to be optimized
         params = [self._noise, self._outputscale]
         if relax_kernel_params:
             params += self.kernel.kernel_hyperparameters
