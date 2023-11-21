@@ -58,6 +58,7 @@ class SparseGaussianProcess():
     def __init__(self,
                  descriptor_dim,
                  invert_mode='v', sgp_mode='dtc',
+                 init_noise=1e-2, init_outputscale=1.0,
                  noise_range=[1e-4, 2], outputscale_range=[0.1, 10]):
         """
         Args:
@@ -73,12 +74,19 @@ class SparseGaussianProcess():
         self.sparse_descriptors = torch.empty((descriptor_dim, 0))
         self.training_outputs = torch.empty((0,))
 
-        # hyperparameters, TODO: clean this up
-        # TODO: invert sigmoid transformation for intuitive choices of hyperparameters
+        # hyperparameters
+        assert ((noise_range[0] > 1e-16) & (noise_range[1] > 1e-16)
+                & (init_noise > 1e-16)), 'noise > 1e-16'
+        assert ((outputscale_range[0] > 1e-16) & (outputscale_range[1] > 1e-16)
+                & (init_outputscale > 1e-16)), 'outputscale > 1e-16'
+        assert noise_range[0] < init_noise < noise_range[1]
+        assert outputscale_range[0] < init_outputscale < outputscale_range[1]
         self.noise_range = noise_range
         self.outputscale_range = outputscale_range
-        self._outputscale = torch.tensor([-2], dtype=torch.float64)
-        self._noise = torch.tensor([-3], dtype=torch.float64)
+        self._noise = self.__convert_hyperparameter(torch.tensor([init_noise], dtype=torch.float64), noise_range)
+        self._outputscale = self.__convert_hyperparameter(torch.tensor([init_outputscale], dtype=torch.float64),
+                                                          outputscale_range)
+
         self.kernel_length = torch.tensor([1], dtype=torch.float64)
 
         assert invert_mode in ['c', 'v', 'qr'], 'only \'c\', \'v\', \'qr\' supported'
@@ -436,6 +444,10 @@ class SparseGaussianProcess():
                 return self.outputscale_range[0] + self.outputscale_range[1] * torch.sigmoid(self._outputscale)
             case 'noise':
                 return self.noise_range[0] + self.noise_range[1] * torch.sigmoid(self._noise)
+
+    def __convert_hyperparameter(self, hparam, param_range):
+        # used for initializing hyperparameters
+        return - torch.log((param_range[1] / (hparam - param_range[0])) - 1)
 
     @property
     def noise(self):
