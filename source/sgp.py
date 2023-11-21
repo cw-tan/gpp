@@ -18,13 +18,11 @@ from lbfgsnew import LBFGSNew
 softplus = torch.nn.Softplus()
 
 # TODOs:
-# 1. replace self.Sigma with self.R_Sigma
-# 2. add test for equivalence of update order
-# 3. make kernel a model child and have it carry its own hyperparameters
-# 4. centralize model update interface (instead of separate sparse and full set updates)
-# 5. hyperparameter optimization based on KL divergence/ELBO
-# 6. logging for hyperparameter optimization
-# 7. not important - set correct behavior for uninitialized model
+# 1. add test for equivalence of update order
+# 2. make kernel a model child and have it carry its own hyperparameters
+# 3. centralize model update interface (instead of separate sparse and full set updates)
+# 4. logging for hyperparameter optimization
+# 5. not important - set correct behavior for uninitialized model
 
 
 def kernel(x1, x2, lengthscale, diag=False):
@@ -52,8 +50,6 @@ def kernel(x1, x2, lengthscale, diag=False):
 
 class SparseGaussianProcess():
     """
-    TODO: device manipulation
-
     class attributes (what you'd get if you do object.attribute):
 
         covariance matrices Kss, Ksf (WITHOUT OUTPUTSCALE PREMULTIPLIED)
@@ -61,16 +57,18 @@ class SparseGaussianProcess():
     """
     def __init__(self,
                  descriptor_dim,
-                 invert_mode='qr', variance_mode='dtc',
-                 noise_range=[1e-4, 2], outputscale_range=[1e-4, 10]):
+                 invert_mode='v', sgp_mode='dtc',
+                 noise_range=[1e-4, 2], outputscale_range=[0.1, 10]):
         """
         Args:
-            descriptor_dim     :
-            invert_mode (str)  :
-            variance_mode (str):
+            descriptor_dim (int)    : dimensionality of descriptor vector
+            invert_mode (str)       : v, qr
+            sgp_mode (str)     : sor, dtc, fitc
+            noise_range (list)      : noise hyperparameter range
+            outputscale_range (list): outputscale hyperparameter range
         """
         # model data
-        self.descriptor_dim = descriptor_dim
+        # self.descriptor_dim = descriptor_dim
         self.full_descriptors = torch.empty((descriptor_dim, 0))
         self.sparse_descriptors = torch.empty((descriptor_dim, 0))
         self.training_outputs = torch.empty((0,))
@@ -83,12 +81,10 @@ class SparseGaussianProcess():
         self._noise = torch.tensor([-3], dtype=torch.float64)
         self.kernel_length = torch.tensor([1], dtype=torch.float64)
 
-        self.optimizer = LBFGSNew([self._noise, self._outputscale, self.kernel_length],
-                                  lr=1e-2, history_size=8, max_iter=6)
         assert invert_mode in ['c', 'v', 'qr'], 'only \'c\', \'v\', \'qr\' supported'
         self.invert_mode = invert_mode
-        assert variance_mode in ['sor', 'dtc', 'fitc'], 'only \'sor\', \'dtc\', \'fitc\' supported'
-        self.variance_mode = variance_mode
+        assert sgp_mode in ['sor', 'dtc', 'fitc', 'vfe'], 'only \'sor\', \'dtc\', \'fitc\', \'vfe\' supported'
+        self.sgp_mode = sgp_mode
 
         # covariance matrices
         self.Kss = None
@@ -112,11 +108,9 @@ class SparseGaussianProcess():
         """
         self.full_descriptors = torch.cat((self.full_descriptors, x_train), dim=1)
         self.training_outputs = torch.cat((self.training_outputs, y_train))
-
         self.sparse_descriptors = torch.cat((self.sparse_descriptors, x_sparse), dim=1)
 
-        # compute covariances matrices without outputscale premultiplied
-        # (speeds up hyperparameter optimization)
+        # compute and keep covariances matrices without outputscale premultiplied
         self.Ksf = kernel(self.sparse_descriptors, self.full_descriptors, self.kernel_length)
         self.Kss = kernel(self.sparse_descriptors, self.sparse_descriptors, self.kernel_length)
 
@@ -167,9 +161,8 @@ class SparseGaussianProcess():
         outputscale = self.__constrained_hyperparameter('outputscale')
         Ksf = outputscale * self.Ksf
         Kss = outputscale * self.Kss
-        # Cholesky decompose Kss
-        Kss = Kss + torch.eye(Kss.shape[0]) * 1e-8  # jitter
-        self.Lss = torch.linalg.cholesky(Kss)
+        # Cholesky decompose Kss with jitter
+        self.Lss = torch.linalg.cholesky(Kss + torch.eye(Kss.shape[0]) * 1e-8)
         # get Λ⁻¹
         self.Lambda_inv = self.__get_Lambda_inv(self.full_descriptors)
 
@@ -194,7 +187,7 @@ class SparseGaussianProcess():
                 _, R = stable_qr(B)  # O(M²N + M³)
                 U_Sigma = torch.linalg.solve_triangular(R, torch.eye(R.shape[0], dtype=torch.float64),
                                                         upper=True)  # O(M³)
-                #print('QR method | cond(R) = {:.4g}'.format(torch.linalg.cond(R).item()))
+                # print('QR method | cond(R) = {:.4g}'.format(torch.linalg.cond(R).item()))
         invert_end = time.time()
         print('{} method | Total inversion time: {:.5g}s'.format(self.invert_mode, invert_end - invert_start))
 
@@ -291,7 +284,7 @@ class SparseGaussianProcess():
         self.alpha = outputscale * self.Ksf @ self.alpha  # O(MN)
         self.alpha = self.Sigma @ self.alpha  # O(M²)
 
-    def get_predictions(self, x_test, mean_var=[True, True]):
+    def get_predictions(self, x_test, mean_var=[True, True], include_noise=False):
         """
         Get predictions of GP model with a set of testing vectors.
 
@@ -307,73 +300,100 @@ class SparseGaussianProcess():
             mean = Kst.T @ self.alpha
             predictions.append(mean)
         if mean_var[1]:
-            match self.variance_mode:
+            match self.sgp_mode:
                 case 'sor':  # quite nonsensical
                     U_Sigma_Kst = self.Sigma.root.T @ Kst
                     var = U_Sigma_Kst.pow(2).sum(dim=0)
-                case 'dtc' | 'fitc':  # more sensible
+                case 'dtc' | 'fitc' | 'vfe':  # more sensible
                     var = outputscale * kernel(x_test, x_test, self.kernel_length, diag=True)
                     Lss_inv_Kst = torch.linalg.solve_triangular(self.Lss, Kst, upper=False)
                     var = var - Lss_inv_Kst.pow(2).sum(dim=0)
                     U_Sigma_T_Kst = self.Sigma.root.T @ Kst
                     var = var + U_Sigma_T_Kst.pow(2).sum(dim=0)
+            if include_noise:
+                var = var + self.__constrained_hyperparameter('noise').pow(2)
             predictions.append(torch.abs(var))
         return predictions
 
     def __compute_negative_log_marginal_likelihood(self):
         """
-        self.negative_log_marginal_likelihood is not updated unless this
-        function or optimize_hyperparameters is called.
-        without the size terms as they are not important for optimization
-        (TODO: decide whether the include for inspection, or just redefine
-               new quantity without it)
+        Internal function to compute the negative log marginal likelihood self._nlml,
+        a quantity to be minimized during hyperparameter optimization.
+        Note:
+        1. self._nlml is not updated unless this function or optimize_hyperparameters is called.
+        2. the size term is neglected as they are not important for optimization (for now)
+        TODO: decide whether the include size term
         """
         outputscale = self.__constrained_hyperparameter('outputscale')
-        fit_term = -0.5 * self.training_outputs.unsqueeze(0) @ self.Lambda_inv
-        fit_term = fit_term @ (self.training_outputs - outputscale * self.Ksf.T @ self.alpha)
-        logdet_Xi_inv = -2 * self.Lss.logdet() - self.Lambda_inv.logdet() - self.Sigma.logdet()
-        self.negative_log_marginal_likelihood = 0.5 * logdet_Xi_inv - fit_term \
-                                                + self.full_descriptors.shape[1] * 0.5 * np.log(2 * np.pi)
+        fit = 0.5 * self.training_outputs.unsqueeze(0) @ self.Lambda_inv
+        fit = fit @ (self.training_outputs - outputscale * self.Ksf.T @ self.alpha)
+        penalty = -1 * self.Lss.logdet() - 0.5 * self.Lambda_inv.logdet() - 0.5 * self.Sigma.logdet()
+        # size = self.full_descriptors.shape[1] * 0.5 * np.log(2 * np.pi)
+        if self.sgp_mode == 'vfe':
+            noise = self.__constrained_hyperparameter('noise')
+            outputscale = self.__constrained_hyperparameter('outputscale')
+            Kff = outputscale * kernel(self.full_descriptors, self.full_descriptors,
+                                       self.kernel_length, diag=True)
+            Ksf = outputscale * self.Ksf
+            aux = torch.linalg.solve_triangular(self.Lss, Ksf, upper=False)
+            trace = torch.sum(Kff - aux.pow(2).sum(dim=0)) / (noise.pow(2).mul(2))
+            self._nlml = penalty + fit + trace  # +size
+        else:
+            self._nlml = penalty + fit  # + size
 
     @property
     def log_marginal_likelihood(self):
         self.__compute_negative_log_marginal_likelihood()
-        return -1 * self.negative_log_marginal_likelihood.item()
+        return -1 * self._nlml.item()
 
-    def optimize_hyperparameters(self, rtol=1e-2, relax_kernel_length=False):
+    def optimize_hyperparameters(self, rtol=1e-2, relax_inducing_points=False, relax_kernel_params=False):
         """
-        Optimize hyperparameters
+        Optimize SGP (and kernel) hyperparameters. This function will always optimize
+        the noise and kernel outputscale by default. It can additionally optimize the
+        inducing points and other kernel parameters.
+
+        Args:
+            rtol (float)                : relative tolerance for terminating optimization
+            relax_inducing_points (bool): whether to relax the inducing points or not
+            relax_kernel_params (bool)  : whether to relax kernel hyperparameters
         """
+        params = [self._noise, self._outputscale]
+        if relax_kernel_params:
+            params.append(self.kernel_length)
+        if relax_inducing_points:
+            params.append(self.sparse_descriptors)
+
+        self.optimizer = LBFGSNew(params, lr=1e-2, history_size=8, max_iter=5)
+
         def closure():
             if torch.is_grad_enabled():
                 self.optimizer.zero_grad()
+            if relax_inducing_points:
+                self.Ksf = kernel(self.sparse_descriptors, self.full_descriptors, self.kernel_length)
+                self.Kss = kernel(self.sparse_descriptors, self.sparse_descriptors, self.kernel_length)
             self.__update_Lss_Sigma_alpha()
             self.__compute_negative_log_marginal_likelihood()
-            if self.negative_log_marginal_likelihood.requires_grad:
-                self.negative_log_marginal_likelihood.backward()
-            return self.negative_log_marginal_likelihood
+            if self._nlml.requires_grad:
+                self._nlml.backward()
+            return self._nlml
 
-        self._noise.requires_grad_()
-        self._outputscale.requires_grad_()
-        self.kernel_length.requires_grad_(relax_kernel_length)
+        for param in params:
+            param.requires_grad_()
         counter = 0
-
         closure()
-        print(self.outputscale, self.noise)
-        print(-self.negative_log_marginal_likelihood.item())
+        print(-self._nlml.item(), self.outputscale, self.noise)
         d_nlml = np.inf
-        prev_nlml = self.negative_log_marginal_likelihood.item()
+        prev_nlml = self._nlml.item()
         while np.abs(d_nlml / prev_nlml) > rtol:
             counter += 1
             self.optimizer.step(closure)
-            this_nlml = self.negative_log_marginal_likelihood.item()
+            this_nlml = self._nlml.item()
             d_nlml = np.abs(this_nlml - prev_nlml)
-            print(self.outputscale, self.noise)
-            print(-self.negative_log_marginal_likelihood.item())
+            print(-self._nlml.item(), self.outputscale, self.noise)
             prev_nlml = this_nlml
-        self._noise.requires_grad_(False)
-        self._outputscale.requires_grad_(False)
-        self.kernel_length.requires_grad_(False)
+
+        for param in params:
+            param.requires_grad_(False)
 
         self.Lambda_inv = self.Lambda_inv.detach()
         self.Lss = self.Lss.detach()
@@ -383,7 +403,7 @@ class SparseGaussianProcess():
 
     def __get_Lambda_inv(self, full_set, update=False):
         """
-        Returns the diagonal matrix Λ⁻¹.
+        Internal function that returns the diagonal matrix Λ⁻¹.
         Note: use of full set as input allows for flexible re-use for FITC
               and during full set updates.
         Args:
@@ -393,20 +413,19 @@ class SparseGaussianProcess():
         """
         size = full_set.shape[1]
         noise = self.__constrained_hyperparameter('noise')
-
-        match self.variance_mode:
-            case 'sor' | 'dtc':
+        match self.sgp_mode:
+            case 'sor' | 'dtc' | 'vfe':
                 return ConstantDiagLinearOperator(noise.pow(-2), size)
             case 'fitc':
-                Kff = kernel(full_set, full_set,
-                             self.kernel_noise, self.kernel_length,
-                             diag=True)
+                outputscale = self.__constrained_hyperparameter('outputscale')
+                Kff = outputscale * kernel(full_set, full_set,
+                                           self.kernel_length, diag=True)
                 if update:  # do not recompute if not full set update
-                    Ksf = kernel(self.sparse_descriptors, full_set,
-                                 self.kernel_noise, self.kernel_length)
+                    Ksf = outputscale * kernel(self.sparse_descriptors, full_set,
+                                               self.kernel_length)
                 else:
-                    Ksf = self.Ksf
-                aux = torch.linalg.solve_triangular(self.Kss.cholesky().to_dense(), Ksf, upper=False)
+                    Ksf = outputscale * self.Ksf
+                aux = torch.linalg.solve_triangular(self.Lss, Ksf, upper=False)
                 Lambda_diag = Kff - aux.pow(2).sum(dim=0)
                 Lambda_diag = Lambda_diag + noise.pow(2).expand(size)
                 return DiagLinearOperator(Lambda_diag).inverse()
