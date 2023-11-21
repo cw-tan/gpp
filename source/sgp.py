@@ -19,8 +19,9 @@ from lbfgsnew import LBFGSNew
 
 # Low priority aesthetic/user-friendliness TODOs:
 # 1. logging for hyperparameter optimization (print to stdout or log in file?)
-# 2. clean up docstrings
-# 3. verbosity for operations? timing etc? may clutter code though
+# 2. proper torch.nn parameter monitoring (may make code cleaner, but more complex)
+# 3. clean up docstrings
+# 4. verbosity for operations? timing etc? may clutter code though
 
 class SparseGaussianProcess(torch.nn.Module):
     """
@@ -90,6 +91,7 @@ class SparseGaussianProcess(torch.nn.Module):
         self.Lss = None
         self.Sigma = None
         self.alpha = None
+        self._nlml = None
 
     def update_model(self, x_train, y_train, x_sparse=None):
         """
@@ -138,7 +140,7 @@ class SparseGaussianProcess(torch.nn.Module):
         # get Λ⁻¹
         self.Lambda_inv = self.__get_Lambda_inv(self.full_descriptors)
 
-        invert_start = time.time()
+        # invert_start = time.time()
         match self.invert_mode:
             case 'c':  # direct Cholesky inverse (most unstable)
                 Sigma_inv = Kss + Ksf @ self.Lambda_inv @ Ksf.T  # O(M²N)
@@ -160,8 +162,8 @@ class SparseGaussianProcess(torch.nn.Module):
                 U_Sigma = torch.linalg.solve_triangular(R, torch.eye(R.shape[0], dtype=torch.float64),
                                                         upper=True)  # O(M³)
                 # print('QR method | cond(R) = {:.4g}'.format(torch.linalg.cond(R).item()))
-        invert_end = time.time()
-        print('{} method | Total inversion time: {:.5g}s'.format(self.invert_mode, invert_end - invert_start))
+        # invert_end = time.time()
+        # print('{} method | Total inversion time: {:.5g}s'.format(self.invert_mode, invert_end - invert_start))
 
         self.Sigma = RootLinearOperator(U_Sigma)
         # compute α by doing matrix-vector multiplications first
@@ -184,15 +186,15 @@ class SparseGaussianProcess(torch.nn.Module):
         Ksf = outputscale * self.Ksf
 
         # Update Σ (U_Σ)
-        Lambda_prime = self.__get_Lambda_inv(torch.atleast_2d(x_train), update=True).inverse()
+        Lambda_prime = self.__get_Lambda_inv(x_train, update=True).inverse()
         Kfps_U = Ksfprime.T @ self.Sigma.root  # O(M²N')
         to_invert = Lambda_prime + Kfps_U @ Kfps_U.T  # O(MN'²)
         L_to_invert = torch.linalg.cholesky(to_invert.to_dense())  # O(N'³)
 
         C = TriangularLinearOperator(L_to_invert).solve(Ksfprime.T @ self.Sigma.root)
         I_minus_CCT = IdentityLinearOperator(C.shape[1]) - C.T @ C  # O(M²N')
-        # TODO: can we use Lanczos here more stably?
         Uprime = root_decomposition(I_minus_CCT, method='cholesky').root  # O(M³)
+
         self.Sigma = RootLinearOperator(self.Sigma.root @ Uprime)  # O(M³) matmul
         self.Lambda_inv = DiagLinearOperator(torch.cat([self.Lambda_inv.diagonal(),
                                                         Lambda_prime.inverse().diagonal()]))
@@ -352,7 +354,7 @@ class SparseGaussianProcess(torch.nn.Module):
         def closure():
             if torch.is_grad_enabled():
                 self.optimizer.zero_grad()
-            if relax_inducing_points:
+            if relax_inducing_points or relax_kernel_params:
                 self.Ksf = self.kernel(self.sparse_descriptors, self.full_descriptors)
                 self.Kss = self.kernel(self.sparse_descriptors, self.sparse_descriptors)
             self.__update_Lss_Sigma_alpha()
@@ -365,7 +367,7 @@ class SparseGaussianProcess(torch.nn.Module):
             param.requires_grad_()
         counter = 0
         closure()
-        print(-self._nlml.item(), self.outputscale, self.noise)
+        print(-self._nlml.item(), self.outputscale, self.noise, self.kernel.lengthscale.item())
         d_nlml = np.inf
         prev_nlml = self._nlml.item()
         while np.abs(d_nlml / prev_nlml) > rtol:
@@ -379,10 +381,15 @@ class SparseGaussianProcess(torch.nn.Module):
         for param in params:
             param.requires_grad_(False)
 
+        # detach intermediate variables
         self.Lambda_inv = self.Lambda_inv.detach()
         self.Lss = self.Lss.detach()
         self.Sigma = self.Sigma.detach()
         self.alpha = self.alpha.detach()
+        self._nlml = self._nlml.detach()
+        if relax_inducing_points or relax_kernel_params:
+            self.Ksf = self.Ksf.detach()
+            self.Kss = self.Kss.detach()
         return counter
 
     def __get_Lambda_inv(self, full_set, update=False):
