@@ -12,69 +12,54 @@ import sys
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lbfgs'))
 from lbfgsnew import LBFGSNew
 
-# Notes:
-# 1. linear operator Cholesky decomposition seems slower than native torch on cpu
-
-softplus = torch.nn.Softplus()
 
 # TODOs:
 # 1. add test for equivalence of update order
-# 2. make kernel a model child and have it carry its own hyperparameters
-# 3. centralize model update interface (instead of separate sparse and full set updates)
-# 4. logging for hyperparameter optimization
-# 5. not important - set correct behavior for uninitialized model
-
-
-def kernel(x1, x2, lengthscale, diag=False):
-    """
-    x1 (torch.Tensor) : d × m tensor where m is the number of x vectors and d is the
-                      dimensionality of the x vectors
-    x2 (torch.Tensor) : d × n tensor n where is the number of x vectors and d is the
-                      dimensionality of the x vectors
-    """
-    assert torch.is_tensor(x1) and torch.is_tensor(x2), 'x1 and x2 must be torch.Tensor'
-    assert 0 < len(x1.shape) <= 2 and 0 < len(x2.shape) <= 2, 'x1 and x2 must be 1D or 2D'
-    x1_mat = torch.atleast_2d(x1)
-    x2_mat = torch.atleast_2d(x2)
-    assert x1_mat.shape[0] == x2_mat.shape[0], 'vector dimensions of x1 and x2 are incompatible'
-
-    if not diag:
-        x1_mat = torch.transpose(x1_mat.unsqueeze(2).expand(x1_mat.shape + (x2_mat.shape[1],)), 0, 1)  # [m, d, n]
-    else:
-        assert x1_mat.shape[1] == x2_mat.shape[1], 'diag = True requires same dims'
-    # the only thing different for other kernels is the last two lines
-    scalar_form = torch.sum((x1_mat - x2_mat).pow(2), dim=1)  # [m, n]
-    # for stability during hyperparameter optimization
-    return torch.exp(-0.5 * scalar_form / lengthscale.pow(2))
+# 2. centralize model update interface (instead of separate sparse and full set updates)
+# 3. logging for hyperparameter optimization
+# 4. not important - set correct behavior for uninitialized model
 
 
 class SparseGaussianProcess():
     """
-    class attributes (what you'd get if you do object.attribute):
+    Supports the following SGP approximations
+    - subset of regressors (SoR)
+    - deterministic training conditional (DTC)
+    - fully independent training conditional (FITC)
+    - variational free energy (VFE)
 
-        covariance matrices Kss, Ksf (WITHOUT OUTPUTSCALE PREMULTIPLIED)
+    Hyperparameter optimization capabilities
+    - noise of data (default)
+    - outputscale of kernel (default)
+    - sparse set of inducing points (optional)
+    - kernel hyperparameters (optional)
 
+    Class attributes:
+    - covariance matrices Kss, Ksf (WITHOUT OUTPUTSCALE PREMULTIPLIED)
     """
     def __init__(self,
-                 descriptor_dim,
+                 descriptor_dim, kernel,
                  invert_mode='v', sgp_mode='dtc',
                  init_noise=1e-2, init_outputscale=1.0,
                  noise_range=[1e-4, 2], outputscale_range=[0.1, 10]):
         """
         Args:
             descriptor_dim (int)    : dimensionality of descriptor vector
-            invert_mode (str)       : v, qr
-            sgp_mode (str)     : sor, dtc, fitc
+            invert_mode (str)       : c, v, qr
+            sgp_mode (str)          : sor, dtc, fitc, vfe
+            init_noise (float)      : noise for initialization
+            init_outputscale (float): outputscale for initialization
             noise_range (list)      : noise hyperparameter range
             outputscale_range (list): outputscale hyperparameter range
         """
-        # model data
-        # self.descriptor_dim = descriptor_dim
+        # model data (maybe data should be kernel attributes)
         self.full_descriptors = torch.empty((descriptor_dim, 0))
         self.sparse_descriptors = torch.empty((descriptor_dim, 0))
         self.training_outputs = torch.empty((0,))
 
-        # hyperparameters
+        self.kernel = kernel
+
+        # basic SGP hyperparameters (noise and outputscale)
         assert ((noise_range[0] > 1e-16) & (noise_range[1] > 1e-16)
                 & (init_noise > 1e-16)), 'noise > 1e-16'
         assert ((outputscale_range[0] > 1e-16) & (outputscale_range[1] > 1e-16)
@@ -87,8 +72,7 @@ class SparseGaussianProcess():
         self._outputscale = self.__convert_hyperparameter(torch.tensor([init_outputscale], dtype=torch.float64),
                                                           outputscale_range)
 
-        self.kernel_length = torch.tensor([1], dtype=torch.float64)
-
+        # inversion mode for Sigma and SGP approximations
         assert invert_mode in ['c', 'v', 'qr'], 'only \'c\', \'v\', \'qr\' supported'
         self.invert_mode = invert_mode
         assert sgp_mode in ['sor', 'dtc', 'fitc', 'vfe'], 'only \'sor\', \'dtc\', \'fitc\', \'vfe\' supported'
@@ -102,7 +86,7 @@ class SparseGaussianProcess():
         self.Lambda_inv = None
         self.Lss = None
         self.Sigma = None
-        self.alpha = None  # for predicting mean efficiently (just a matmul with this)
+        self.alpha = None
 
     def update_model(self, x_train, y_train, x_sparse):
         """
@@ -119,47 +103,11 @@ class SparseGaussianProcess():
         self.sparse_descriptors = torch.cat((self.sparse_descriptors, x_sparse), dim=1)
 
         # compute and keep covariances matrices without outputscale premultiplied
-        self.Ksf = kernel(self.sparse_descriptors, self.full_descriptors, self.kernel_length)
-        self.Kss = kernel(self.sparse_descriptors, self.sparse_descriptors, self.kernel_length)
+        self.Ksf = self.kernel(self.sparse_descriptors, self.full_descriptors)
+        self.Kss = self.kernel(self.sparse_descriptors, self.sparse_descriptors)
 
         self.__update_Lss_Sigma_alpha()
         # TODO: use this function to unify initialization, full set and sparse set updates
-
-    def get_duplicate_ids(self, x1, x2, tol=1e-8):
-        """
-        Get indices of duplicate points based on a kernel function with output range [0,1]
-        within given tolerance. The duplicate indices correspond to that of x2 (i.e. we
-        keep x1 as is and remove the duplicate indices from x2).
-
-        Args:
-            x1, x2 (torch.Tensor): d × m tensors where d is the dimensionality and m is the number
-                                   of descriptor vectors
-            tol (float)          : how close the entries of K(x1, x2) are to 1
-        """
-        if x1.shape[1] > x2.shape[1]:
-            x_larger, x_smaller = x1, x2
-        else:
-            x_larger, x_smaller = x2, x1
-        triu_ids = torch.triu_indices(x_smaller.shape[1], x_larger.shape[1], offset=int(torch.equal(x1, x2)))
-        K = kernel(x_smaller, x_larger, self.kernel_length)
-        duplicate_triu_ids = torch.nonzero((1 - K[triu_ids[0], triu_ids[1]]) < tol, as_tuple=True)[0]
-        if x1.shape[1] > x2.shape[1]:
-            duplicate_ids = triu_ids[0][duplicate_triu_ids]
-        else:
-            duplicate_ids = triu_ids[1][duplicate_triu_ids]
-        return duplicate_ids
-
-    def remove_duplicates(self, x1, x2, tol=1e-8):
-        """
-        Returns x2 with duplicates (based on comparisons to x1) removed
-        within some tolerance.
-        """
-        ids_to_remove = self.get_duplicate_ids(x1, x2, tol)
-        mask = torch.ones(x2.shape[1], dtype=torch.bool)
-        mask[ids_to_remove] = False
-        all_ids = torch.arange(x2.shape[1])
-        ids_to_keep = all_ids[mask]
-        return x2[:, ids_to_keep]
 
     def __update_Lss_Sigma_alpha(self):
         """
@@ -214,7 +162,7 @@ class SparseGaussianProcess():
 
         # update covariance matrices
         outputscale = self.__constrained_hyperparameter('outputscale')
-        Ksfprime = kernel(self.sparse_descriptors, torch.atleast_2d(x_train), self.kernel_length)
+        Ksfprime = self.kernel(self.sparse_descriptors, x_train)
         self.Ksf = torch.cat([self.Ksf, Ksfprime], dim=1)
         Ksfprime = outputscale * Ksfprime
         Ksf = outputscale * self.Ksf
@@ -244,13 +192,13 @@ class SparseGaussianProcess():
         # update covariance matrices
         outputscale = self.__constrained_hyperparameter('outputscale')
         # Kss
-        Kssprime = kernel(self.sparse_descriptors, torch.atleast_2d(x_sparse), self.kernel_length)
-        Ksprimesprime = kernel(torch.atleast_2d(x_sparse), torch.atleast_2d(x_sparse), self.kernel_length)
+        Kssprime = self.kernel(self.sparse_descriptors, x_sparse)
+        Ksprimesprime = self.kernel(torch.atleast_2d(x_sparse), torch.atleast_2d(x_sparse))
         Kss_upper = torch.cat([self.Kss, Kssprime], dim=1)
         Kss_lower = torch.cat([Kssprime.T, Ksprimesprime], dim=1)
         self.Kss = torch.cat([Kss_upper, Kss_lower], dim=0)
         # Ksf
-        Kfsprime = kernel(self.full_descriptors, torch.atleast_2d(x_sparse), self.kernel_length)  # without outputscale
+        Kfsprime = self.kernel(self.full_descriptors, x_sparse)  # without outputscale
         Ksf_prev = outputscale * self.Ksf  # required later
         self.Ksf = torch.cat([self.Ksf, Kfsprime.T], dim=0)  # without outputscale
 
@@ -302,7 +250,7 @@ class SparseGaussianProcess():
         """
         # compute covariance matrix
         outputscale = self.__constrained_hyperparameter('outputscale')
-        Kst = outputscale * kernel(self.sparse_descriptors, x_test, self.kernel_length)
+        Kst = outputscale * self.kernel(self.sparse_descriptors, x_test)
         predictions = []
         if mean_var[0]:
             mean = Kst.T @ self.alpha
@@ -313,7 +261,7 @@ class SparseGaussianProcess():
                     U_Sigma_Kst = self.Sigma.root.T @ Kst
                     var = U_Sigma_Kst.pow(2).sum(dim=0)
                 case 'dtc' | 'fitc' | 'vfe':  # more sensible
-                    var = outputscale * kernel(x_test, x_test, self.kernel_length, diag=True)
+                    var = outputscale * self.kernel(x_test, x_test, diag=True)
                     Lss_inv_Kst = torch.linalg.solve_triangular(self.Lss, Kst, upper=False)
                     var = var - Lss_inv_Kst.pow(2).sum(dim=0)
                     U_Sigma_T_Kst = self.Sigma.root.T @ Kst
@@ -340,8 +288,7 @@ class SparseGaussianProcess():
         if self.sgp_mode == 'vfe':
             noise = self.__constrained_hyperparameter('noise')
             outputscale = self.__constrained_hyperparameter('outputscale')
-            Kff = outputscale * kernel(self.full_descriptors, self.full_descriptors,
-                                       self.kernel_length, diag=True)
+            Kff = outputscale * self.kernel(self.full_descriptors, self.full_descriptors, diag=True)
             Ksf = outputscale * self.Ksf
             aux = torch.linalg.solve_triangular(self.Lss, Ksf, upper=False)
             trace = torch.sum(Kff - aux.pow(2).sum(dim=0)) / (noise.pow(2).mul(2))
@@ -367,7 +314,7 @@ class SparseGaussianProcess():
         """
         params = [self._noise, self._outputscale]
         if relax_kernel_params:
-            params.append(self.kernel_length)
+            params += self.kernel.kernel_hyperparameters
         if relax_inducing_points:
             params.append(self.sparse_descriptors)
 
@@ -377,8 +324,8 @@ class SparseGaussianProcess():
             if torch.is_grad_enabled():
                 self.optimizer.zero_grad()
             if relax_inducing_points:
-                self.Ksf = kernel(self.sparse_descriptors, self.full_descriptors, self.kernel_length)
-                self.Kss = kernel(self.sparse_descriptors, self.sparse_descriptors, self.kernel_length)
+                self.Ksf = self.kernel(self.sparse_descriptors, self.full_descriptors)
+                self.Kss = self.kernel(self.sparse_descriptors, self.sparse_descriptors)
             self.__update_Lss_Sigma_alpha()
             self.__compute_negative_log_marginal_likelihood()
             if self._nlml.requires_grad:
@@ -426,11 +373,9 @@ class SparseGaussianProcess():
                 return ConstantDiagLinearOperator(noise.pow(-2), size)
             case 'fitc':
                 outputscale = self.__constrained_hyperparameter('outputscale')
-                Kff = outputscale * kernel(full_set, full_set,
-                                           self.kernel_length, diag=True)
+                Kff = outputscale * self.kernel(full_set, full_set, diag=True)
                 if update:  # do not recompute if not full set update
-                    Ksf = outputscale * kernel(self.sparse_descriptors, full_set,
-                                               self.kernel_length)
+                    Ksf = outputscale * self.kernel(self.sparse_descriptors, full_set)
                 else:
                     Ksf = outputscale * self.Ksf
                 aux = torch.linalg.solve_triangular(self.Lss, Ksf, upper=False)
