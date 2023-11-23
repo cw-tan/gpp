@@ -243,11 +243,8 @@ class SparseGaussianProcess(torch.nn.Module):
         aux = B.T @ self.Sigma.root  # O(M²M')
         to_invert = C - aux @ aux.T  # O(MM'²)
 
-        # lanczos is stable because of low-rank approximation
-        U_Psi = root_inv_decomposition(to_invert, method='lanczos').root.to_dense()  # O(M'³)
-        U_Psi = torch.cat([U_Psi, torch.zeros((U_Psi.shape[0], to_invert.shape[1] - U_Psi.shape[1]),
-                                              dtype=torch.float64)], dim=1)
-
+        # get root decomposition of Psi
+        U_Psi = root_inv_decomposition(to_invert, method='svd').root.to_dense()  # O(M'³)
         # RQ decomposition to make U_Psi upper triangular
         P1 = torch.fliplr(torch.eye(U_Psi.shape[0], dtype=torch.float64))
         P2 = torch.fliplr(torch.eye(U_Psi.shape[1], dtype=torch.float64))
@@ -376,11 +373,11 @@ class SparseGaussianProcess(torch.nn.Module):
         counter = 0
         closure()
         with open('hypopt.dat', 'w') as f:
-            f.write('{:^15} {:^15} {:^15}\n' 
+            f.write('{:^15} {:^15} {:^15}\n'
                     .format('NLML', 'Outputscale', 'Noise'))
-            f.write('{:^15.8g} {:^15.8g} {:^15.8g}\n' 
+            f.write('{:^15.8g} {:^15.8g} {:^15.8g}\n'
                     .format(-self._nlml.item(), self.outputscale, self.noise))
-        
+
         d_nlml = np.inf
         prev_nlml = self._nlml.item()
         while np.abs(d_nlml / prev_nlml) > rtol:
@@ -389,8 +386,8 @@ class SparseGaussianProcess(torch.nn.Module):
             this_nlml = self._nlml.item()
             d_nlml = np.abs(this_nlml - prev_nlml)
             with open('hypopt.dat', 'a') as f:
-                f.write('{:^15.8g} {:^15.8g} {:^15.8g}\n' 
-                    .format(-self._nlml.item(), self.outputscale, self.noise))
+                f.write('{:^15.8g} {:^15.8g} {:^15.8g}\n'
+                        .format(-self._nlml.item(), self.outputscale, self.noise))
             prev_nlml = this_nlml
 
         for param in params:
