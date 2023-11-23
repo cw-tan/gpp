@@ -18,10 +18,9 @@ from lbfgsnew import LBFGSNew
 # 2. add more kernels?
 
 # Low priority aesthetic/user-friendliness TODOs:
-# 1. logging for hyperparameter optimization (print to stdout or log in file?)
-# 2. proper torch.nn parameter monitoring (may make code cleaner, but more complex)
-# 3. clean up docstrings
-# 4. verbosity for operations? timing etc? may clutter code though
+# 1. proper torch.nn parameter monitoring (may make code cleaner, but more complex)
+# 2. clean up docstrings
+# 3. verbosity for operations? timing etc? may clutter code though
 
 class SparseGaussianProcess(torch.nn.Module):
     """
@@ -245,7 +244,16 @@ class SparseGaussianProcess(torch.nn.Module):
         to_invert = C - aux @ aux.T  # O(MM'²)
 
         # lanczos is stable because of low-rank approximation
-        U_Psi = root_inv_decomposition(to_invert, method='lanczos').root  # O(M'³)
+        U_Psi = root_inv_decomposition(to_invert, method='lanczos').root.to_dense()  # O(M'³)
+        U_Psi = torch.cat([U_Psi, torch.zeros((U_Psi.shape[0], to_invert.shape[1] - U_Psi.shape[1]),
+                                              dtype=torch.float64)], dim=1)
+
+        # RQ decomposition to make U_Psi upper triangular
+        P1 = torch.fliplr(torch.eye(U_Psi.shape[0], dtype=torch.float64))
+        P2 = torch.fliplr(torch.eye(U_Psi.shape[1], dtype=torch.float64))
+        _, R = torch.linalg.qr((P1 @ U_Psi).T, mode='complete')
+        R = P1 @ R.T @ P2
+        U_Psi = R
 
         upper_right = B @ U_Psi  # O(MM'²)
         upper_right = -1 * self.Sigma @ upper_right  # O(M²M')
@@ -367,7 +375,12 @@ class SparseGaussianProcess(torch.nn.Module):
             param.requires_grad_()
         counter = 0
         closure()
-        print(-self._nlml.item(), self.outputscale, self.noise, self.kernel.lengthscale.item())
+        with open('hypopt.dat', 'w') as f:
+            f.write('{:^15} {:^15} {:^15}\n' 
+                    .format('NLML', 'Outputscale', 'Noise'))
+            f.write('{:^15.8g} {:^15.8g} {:^15.8g}\n' 
+                    .format(-self._nlml.item(), self.outputscale, self.noise))
+        
         d_nlml = np.inf
         prev_nlml = self._nlml.item()
         while np.abs(d_nlml / prev_nlml) > rtol:
@@ -375,7 +388,9 @@ class SparseGaussianProcess(torch.nn.Module):
             self.optimizer.step(closure)
             this_nlml = self._nlml.item()
             d_nlml = np.abs(this_nlml - prev_nlml)
-            print(-self._nlml.item(), self.outputscale, self.noise)
+            with open('hypopt.dat', 'a') as f:
+                f.write('{:^15.8g} {:^15.8g} {:^15.8g}\n' 
+                    .format(-self._nlml.item(), self.outputscale, self.noise))
             prev_nlml = this_nlml
 
         for param in params:
