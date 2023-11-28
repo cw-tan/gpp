@@ -241,10 +241,10 @@ class SparseGaussianProcess(torch.nn.Module):
         Lambda_inv_root_Kfsp = self.Lambda_inv.sqrt() @ Kfsprime  # O(NM') since Λ⁻¹ is diagonal
         C = Ksprimesprime + Lambda_inv_root_Kfsp.T @ Lambda_inv_root_Kfsp  # O(N²M')
         aux = B.T @ self.Sigma.root  # O(M²M')
-        to_invert = C - aux @ aux.T  # O(MM'²)
+        schur = C - aux @ aux.T  # O(MM'²)
 
         # get root decomposition of Psi
-        U_Psi = root_inv_decomposition(to_invert, method='svd').root.to_dense()  # O(M'³)
+        U_Psi = root_inv_decomposition(schur, method='svd').root.to_dense()  # O(M'³)
         # RQ decomposition to make U_Psi upper triangular
         P1 = torch.fliplr(torch.eye(U_Psi.shape[0], dtype=torch.float64))
         P2 = torch.fliplr(torch.eye(U_Psi.shape[1], dtype=torch.float64))
