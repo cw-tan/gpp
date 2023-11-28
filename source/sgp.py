@@ -244,7 +244,10 @@ class SparseGaussianProcess(torch.nn.Module):
         schur = C - aux @ aux.T  # O(MM'²)
 
         # get root decomposition of Psi
-        U_Psi = root_inv_decomposition(schur, method='svd').root.to_dense()  # O(M'³)
+        L, Q = torch.linalg.eigh(schur)  # O(M'³)
+        regularizedQ = Q * torch.sign(L).unsqueeze(-2)
+        regularizedL = torch.diag(torch.clamp(torch.abs(L), min=1e-7).pow(-1/2))
+        U_Psi = regularizedQ @ regularizedL
         # RQ decomposition to make U_Psi upper triangular
         P1 = torch.fliplr(torch.eye(U_Psi.shape[0], dtype=torch.float64))
         P2 = torch.fliplr(torch.eye(U_Psi.shape[1], dtype=torch.float64))
