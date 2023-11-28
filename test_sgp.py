@@ -16,39 +16,38 @@ L = 10
 x_test = torch.linspace(-L - 1, L + 1, 1000, dtype=torch.float64)
 
 kernel = SquaredExponentialKernel()
-SGP = SparseGaussianProcess(1, kernel, invert_mode='v', sgp_mode='vfe')
+SGP = SparseGaussianProcess(1, kernel, invert_mode='v', sgp_mode='vfe', init_noise=0.3)
 
 print(SGP.outputscale, SGP.noise)
 
-
-x_train = L * (2 * torch.rand(100, dtype=torch.float64) - 1)
+x_train = L * (2 * torch.rand(200, dtype=torch.float64) - 1)
 y_train = func(x_train)
 plt.plot(x_train, y_train, 'ko')
 
-x_sparse = torch.atleast_2d(x_train[torch.randperm(len(x_train))[:5]])
+x_sparse = torch.atleast_2d(x_train[torch.randperm(len(x_train))[:50]])
 x_sparse = kernel.remove_duplicates(x_sparse, x_sparse, tol=1e-7)
 SGP.update_model(torch.atleast_2d(x_train), y_train, x_sparse)
 plt.plot(x_train, y_train, 'ko', label='Training Points')
-plt.plot(x_sparse[0,:], torch.full((x_sparse.shape[1], ), -3), 'b^', label='Initial Inducing Points', markersize=15)
 
 
-for i in range(10):
+for i in range(60):
     x_train = L * (2 * torch.rand(10, dtype=torch.float64) - 1)
-    
-    x_sparse_new = torch.atleast_2d(x_train[torch.randperm(len(x_train))[:1]])
-    x_sparse_new = kernel.remove_duplicates(x_sparse_new, x_sparse_new, tol=1e-7)
-    x_sparse_new = kernel.remove_duplicates(SGP.sparse_descriptors, x_sparse_new, tol=1e-7)
-
-    #SGP.update_model(None, None, x_sparse_new)
-    plt.plot(x_sparse_new[0,:], func(x_sparse_new[0,:]), 'g+', markersize=15)
-
     y_train = func(x_train)
-    SGP.update_model(torch.atleast_2d(x_train), y_train, x_sparse_new)
     plt.plot(x_train, y_train, 'ko')
 
+    x_sparse_new = torch.atleast_2d(x_train[torch.randperm(len(x_train))[:3]])
+    x_sparse_new = kernel.remove_duplicates(x_sparse_new, x_sparse_new, tol=1e-7)
+    x_sparse_new = kernel.remove_duplicates(SGP.sparse_descriptors, x_sparse_new, tol=1e-7)
+    SGP.update_model(torch.atleast_2d(x_train), y_train, x_sparse_new)
 
-steps = SGP.optimize_hyperparameters(relax_inducing_points=True, relax_kernel_params=False)
-print(steps)
+
+x_sparse = SGP.sparse_descriptors
+plt.plot(x_sparse[0,:], torch.full((x_sparse.shape[1], ), -3), 'b^', label='Initial Inducing Points', markersize=15)
+
+#steps = SGP.optimize_hyperparameters(rtol=1e-4, relax_inducing_points=True, relax_kernel_params=False)
+#print(steps)
+#steps = SGP.optimize_hyperparameters(rtol=1e-2, relax_inducing_points=False, relax_kernel_params=True)
+
 
 x_sparse = SGP.sparse_descriptors
 plt.plot(x_sparse[0,:], torch.full((x_sparse.shape[1], ), -2.5), 'g^', label='Optimized Inducing Points', markersize=15)
