@@ -1,7 +1,6 @@
 import numpy as np
 import torch
-from linear_operator.operators import IdentityLinearOperator, ConstantDiagLinearOperator, \
-                                      DiagLinearOperator
+from linear_operator.operators import ConstantDiagLinearOperator, DiagLinearOperator
 from linear_operator.utils import stable_qr
 
 import time
@@ -10,7 +9,7 @@ import sys
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lbfgs'))
 from lbfgsnew import LBFGSNew
 
-from utils import *
+from utils import cholesky_update
 
 # Extensions:
 # 1. derivatives - need to redesign how SGP and Kernel classes interact?
@@ -76,7 +75,8 @@ class SparseGaussianProcess(torch.nn.Module):
                                                           outputscale_range)
 
         # inversion mode for Sigma and SGP approximations
-        assert invert_mode in ['c', 'v', 'qr'], 'only \'c\', \'v\', \'qr\' supported'
+        assert invert_mode in ['c', 'v', 'qr'], 'invert_mode {} not supported \
+                                                 only \'c\', \'v\', \'qr\' supported'.format(invert_mode)
         self.invert_mode = invert_mode
         assert sgp_mode in ['sor', 'dtc', 'fitc', 'vfe'], 'only \'sor\', \'dtc\', \'fitc\', \'vfe\' supported'
         self.sgp_mode = sgp_mode
@@ -121,10 +121,21 @@ class SparseGaussianProcess(torch.nn.Module):
             self.Kss = self.kernel(self.sparse_descriptors, self.sparse_descriptors)
             self.__update_Lss_Sigma_alpha()
         else:
-            if x_sparse is not None:
-                self.__update_sparse_set(x_sparse)
-            if x_train is not None:
-                self.__update_full_set(x_train, y_train)
+            if self.sgp_mode == 'fitc':  # fast update doesn't work for FITC
+                if x_train is not None:
+                    self.full_descriptors = torch.cat((self.full_descriptors, x_train), dim=1)
+                    self.training_outputs = torch.cat((self.training_outputs, y_train))
+                if x_sparse is not None:
+                    self.sparse_descriptors = torch.cat((self.sparse_descriptors, x_sparse), dim=1)
+                # compute and keep covariances matrices without outputscale premultiplied
+                self.Ksf = self.kernel(self.sparse_descriptors, self.full_descriptors)
+                self.Kss = self.kernel(self.sparse_descriptors, self.sparse_descriptors)
+                self.__update_Lss_Sigma_alpha()
+            else:
+                if x_train is not None:
+                    self.__update_full_set(x_train, y_train)
+                if x_sparse is not None:
+                    self.__update_sparse_set(x_sparse)
 
     def __update_Lss_Sigma_alpha(self):
         """
@@ -183,9 +194,8 @@ class SparseGaussianProcess(torch.nn.Module):
 
         # Update Σ (U_Σ)
         Lambda_inv_prime = self.__get_Lambda_inv(x_train, update=True)
-        aux = Lambda_inv_prime.sqrt() @ Ksfprime.T
-        # TODO: replace with sequential rank-1 Cholesky updates
-        self.L_Sigma = torch.linalg.cholesky(self.L_Sigma @ self.L_Sigma.T + aux.T @ aux + torch.eye(self.L_Sigma.shape[0]) * 1e-8)
+        aux = Ksfprime @ Lambda_inv_prime.sqrt()
+        self.L_Sigma = cholesky_update(self.L_Sigma, aux)
         self.Lambda_inv = DiagLinearOperator(torch.cat([self.Lambda_inv.diagonal(),
                                                         Lambda_inv_prime.diagonal()]))
 
@@ -235,18 +245,15 @@ class SparseGaussianProcess(torch.nn.Module):
         C = Ksprimesprime + Lambda_inv_root_Kfsp.T @ Lambda_inv_root_Kfsp  # O(N²M')
         aux = torch.linalg.solve_triangular(self.L_Sigma, B, upper=False)  # O(M²M')
         schur = C - aux.T @ aux  # O(MM'²)
-
-        # get root decomposition of Schur complement
-        L, Q = torch.linalg.eigh(schur)  # O(M'³)
-        regularizedQT = Q.T * torch.sign(L).unsqueeze(-2)
-        regularizedL = torch.diag(torch.clamp(torch.abs(L), min=1e-7).pow(1 / 2))
-        leftroot = regularizedQT @ regularizedL
-        _, R = stable_qr(leftroot.T)
+        # get nearest psd schur (https://doi.org/10.1016/0024-3795(88)90223-6)
+        schur = 0.5 * (schur + schur.T)
+        L, Q = torch.linalg.eigh(schur)
+        schur = Q @ torch.diag(torch.clamp(L, min=0)) @ Q.T
+        L_Psi = torch.linalg.cholesky(schur + 1e-8 * torch.eye(schur.shape[0], dtype=torch.float64))
         # assemble new L_Sigma
-        L_upper = torch.cat([self.L_Sigma, torch.zeros((self.L_Sigma.shape[0], R.shape[1]))], dim=1)
-        L_lower = torch.cat([aux.T, R.T], dim=1)
-        L_Sigma = torch.cat([L_upper, L_lower], dim=0)
-        self.L_Sigma = L_Sigma
+        L_upper = torch.cat([self.L_Sigma, torch.zeros((self.L_Sigma.shape[0], L_Psi.shape[1]))], dim=1)
+        L_lower = torch.cat([aux.T, L_Psi], dim=1)
+        self.L_Sigma = torch.cat([L_upper, L_lower], dim=0)
 
         self.alpha = self.Lambda_inv @ self.training_outputs  # O(N) since Λ⁻¹ is diagonal
         self.alpha = outputscale * self.Ksf @ self.alpha  # O(MN)
@@ -283,14 +290,14 @@ class SparseGaussianProcess(torch.nn.Module):
             if mean_var[1]:
                 match self.sgp_mode:
                     case 'sor':  # quite nonsensical
-                        U_Sigma_Kst = self.Sigma.root.T @ Kst
-                        var = U_Sigma_Kst.pow(2).sum(dim=0)
+                        LSigma_inv_Kst = torch.linalg.solve_triangular(self.L_Sigma, Kst, upper=False)
+                        var = LSigma_inv_Kst.pow(2).sum(dim=0)
                     case 'dtc' | 'fitc' | 'vfe':  # more sensible
                         var = outputscale * self.kernel(x_test, x_test, diag=True)
                         Lss_inv_Kst = torch.linalg.solve_triangular(self.Lss, Kst, upper=False)
                         var = var - Lss_inv_Kst.pow(2).sum(dim=0)
-                        U_Sigma_T_Kst = torch.linalg.solve_triangular(self.L_Sigma, Kst, upper=False)
-                        var = var + U_Sigma_T_Kst.pow(2).sum(dim=0)
+                        LSigma_inv_Kst = torch.linalg.solve_triangular(self.L_Sigma, Kst, upper=False)
+                        var = var + LSigma_inv_Kst.pow(2).sum(dim=0)
                 if include_noise:
                     var = var + self.__constrained_hyperparameter('noise').pow(2)
                 predictions.append(torch.abs(var))

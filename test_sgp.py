@@ -20,22 +20,22 @@ SGP = SparseGaussianProcess(1, kernel, invert_mode='v', sgp_mode='vfe', init_noi
 
 print(SGP.outputscale, SGP.noise)
 
-x_train = L * (2 * torch.rand(200, dtype=torch.float64) - 1)
+x_train = L * (2 * torch.rand(30, dtype=torch.float64) - 1)
 y_train = func(x_train)
 plt.plot(x_train, y_train, 'ko')
 
-x_sparse = torch.atleast_2d(x_train[torch.randperm(len(x_train))[:50]])
+x_sparse = torch.atleast_2d(x_train[torch.randperm(len(x_train))[:10]])
 x_sparse = kernel.remove_duplicates(x_sparse, x_sparse, tol=1e-7)
 SGP.update_model(torch.atleast_2d(x_train), y_train, x_sparse)
 plt.plot(x_train, y_train, 'ko', label='Training Points')
 
 
-for i in range(60):
-    x_train = L * (2 * torch.rand(10, dtype=torch.float64) - 1)
+for i in range(5):
+    x_train = L * (2 * torch.rand(200, dtype=torch.float64) - 1)
     y_train = func(x_train)
     plt.plot(x_train, y_train, 'ko')
 
-    x_sparse_new = torch.atleast_2d(x_train[torch.randperm(len(x_train))[:3]])
+    x_sparse_new = torch.atleast_2d(x_train[torch.randperm(len(x_train))[:50]])
     x_sparse_new = kernel.remove_duplicates(x_sparse_new, x_sparse_new, tol=1e-7)
     x_sparse_new = kernel.remove_duplicates(SGP.sparse_descriptors, x_sparse_new, tol=1e-7)
     SGP.update_model(torch.atleast_2d(x_train), y_train, x_sparse_new)
