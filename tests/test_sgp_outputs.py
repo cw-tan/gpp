@@ -28,10 +28,10 @@ class TestSGPOutputs(unittest.TestCase):
         print('Testing efficient updates ...')
         for mode in ['sor', 'dtc', 'fitc', 'vfe']:
             for inv in ['v', 'qr']:
-                SGP1 = SparseGaussianProcess(1, self.kernel, invert_mode=inv, sgp_mode=mode)
+                SGP1 = SparseGaussianProcess(1, self.kernel, decomp_mode=inv, sgp_mode=mode)
                 SGP1.update_model(self.x_train, self.y_train, self.x_sparse)
 
-                SGP2 = SparseGaussianProcess(1, self.kernel, invert_mode=inv, sgp_mode=mode)
+                SGP2 = SparseGaussianProcess(1, self.kernel, decomp_mode=inv, sgp_mode=mode)
                 SGP2.update_model(self.x_train[:, :500], self.y_train[:500], self.x_sparse[:, :100])
                 SGP2.update_model(self.x_train[:, 500:750], self.y_train[500:750], None)
                 SGP2.update_model(None, None, self.x_sparse[:, 100:150])

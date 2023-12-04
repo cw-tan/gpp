@@ -12,13 +12,13 @@ from lbfgsnew import LBFGSNew
 from utils import cholesky_update
 
 # Extensions:
-# 1. derivatives - need to redesign how SGP and Kernel classes interact?
-# 2. add more kernels?
+# 1. derivatives - need to redesign how SGP and Kernel classes interact
 
 # Low priority aesthetic/user-friendliness TODOs:
 # 1. proper torch.nn parameter monitoring (may make code cleaner, but more complex)
 # 2. clean up docstrings
 # 3. verbosity for operations? timing etc? may clutter code though
+# 4. logging for timing and predictions for active learning
 
 
 class SparseGaussianProcess(torch.nn.Module):
@@ -28,6 +28,9 @@ class SparseGaussianProcess(torch.nn.Module):
     - deterministic training conditional (DTC)
     - fully independent training conditional (FITC)
     - variational free energy (VFE)
+
+    Utilizes efficient model updates for all
+    SGP approximations except FITC
 
     Hyperparameter optimization capabilities
     - noise of data (default)
@@ -40,13 +43,13 @@ class SparseGaussianProcess(torch.nn.Module):
     """
     def __init__(self,
                  descriptor_dim, kernel,
-                 invert_mode='v', sgp_mode='dtc',
+                 decomp_mode='v', sgp_mode='dtc',
                  init_noise=1e-2, init_outputscale=1.0,
                  noise_range=[1e-4, 2], outputscale_range=[0.1, 10]):
         """
         Args:
             descriptor_dim (int)    : dimensionality of descriptor vector
-            invert_mode (str)       : c, v, qr
+            decomp_mode (str)       : c, v, qr
             sgp_mode (str)          : sor, dtc, fitc, vfe
             init_noise (float)      : noise for initialization
             init_outputscale (float): outputscale for initialization
@@ -75,9 +78,9 @@ class SparseGaussianProcess(torch.nn.Module):
                                                           outputscale_range)
 
         # inversion mode for Sigma and SGP approximations
-        assert invert_mode in ['c', 'v', 'qr'], 'invert_mode {} not supported \
-                                                 only \'c\', \'v\', \'qr\' supported'.format(invert_mode)
-        self.invert_mode = invert_mode
+        assert decomp_mode in ['c', 'v', 'qr'], 'decomp_mode {} not supported \
+                                                 only \'c\', \'v\', \'qr\' supported'.format(decomp_mode)
+        self.decomp_mode = decomp_mode
         assert sgp_mode in ['sor', 'dtc', 'fitc', 'vfe'], 'only \'sor\', \'dtc\', \'fitc\', \'vfe\' supported'
         self.sgp_mode = sgp_mode
 
@@ -119,9 +122,9 @@ class SparseGaussianProcess(torch.nn.Module):
             # compute and keep covariances matrices without outputscale premultiplied
             self.Ksf = self.kernel(self.sparse_descriptors, self.full_descriptors)
             self.Kss = self.kernel(self.sparse_descriptors, self.sparse_descriptors)
-            self.__update_Lss_Sigma_alpha()
+            self.__update_intermediates()
         else:
-            if self.sgp_mode == 'fitc':  # fast update doesn't work for FITC
+            if self.sgp_mode == 'fitc':  # efficient update doesn't work for FITC
                 if x_train is not None:
                     self.full_descriptors = torch.cat((self.full_descriptors, x_train), dim=1)
                     self.training_outputs = torch.cat((self.training_outputs, y_train))
@@ -130,47 +133,46 @@ class SparseGaussianProcess(torch.nn.Module):
                 # compute and keep covariances matrices without outputscale premultiplied
                 self.Ksf = self.kernel(self.sparse_descriptors, self.full_descriptors)
                 self.Kss = self.kernel(self.sparse_descriptors, self.sparse_descriptors)
-                self.__update_Lss_Sigma_alpha()
+                self.__update_intermediates()
             else:
                 if x_train is not None:
                     self.__update_full_set(x_train, y_train)
                 if x_sparse is not None:
                     self.__update_sparse_set(x_sparse)
 
-    def __update_Lss_Sigma_alpha(self):
+    def __update_intermediates(self):
         """
-        This function is called for initialization and for hyperparameter tuning.
+        This function is called to update the intermediate quantities
+        Lss, L_Sigma and alpha. This function is only called during
+        initialization and for hyperparameter tuning.
         """
         # multiply outputscale to covariance matrices
         outputscale = self.__constrained_hyperparameter('outputscale')
         Ksf = outputscale * self.Ksf
         Kss = outputscale * self.Kss
         # Cholesky decompose Kss with jitter
-        self.Lss = torch.linalg.cholesky(Kss + torch.eye(Kss.shape[0]) * 1e-8)
+        self.Lss = torch.linalg.cholesky(Kss + torch.eye(Kss.shape[0]) * 1e-8)  # O(M³)
         # get Λ⁻¹
         self.Lambda_inv = self.__get_Lambda_inv(self.full_descriptors)
 
         # invert_start = time.time()
-        match self.invert_mode:
-            case 'c':  # direct Cholesky inverse (most unstable)
+        match self.decomp_mode:
+            case 'c':  # direct Cholesky factorization (least reliable but cheap)
                 Sigma = Kss + Ksf @ self.Lambda_inv @ Ksf.T  # O(M²N)
-                Sigma = Sigma + torch.eye(self.sparse_descriptors.shape[1])  # large jitter!
+                Sigma = Sigma + 1e-8 * torch.eye(self.sparse_descriptors.shape[1])
                 self.L_Sigma = torch.linalg.cholesky(Sigma)  # O(M³)
-                # print('N method | cond(L_Σ_inv) = {:.4g}'.format(torch.linalg.cond(L_Sigma_inv).item()))
-            case 'v':  # V method (usually stable)
+            case 'v':  # V method (reasonably reliable and moderately expensive)
                 V = torch.linalg.solve_triangular(self.Lss, Ksf, upper=False)  # O(M²N)
-                V_Lambda_inv_sqrt = V @ self.Lambda_inv.sqrt()  # O(MN) since Λ⁻¹ is diagonal
-                Gamma = torch.eye(V.shape[0], dtype=torch.float64) + V_Lambda_inv_sqrt @ V_Lambda_inv_sqrt.T  # O(M²N)
+                V_aux = V @ self.Lambda_inv.sqrt()  # O(MN) since Λ⁻¹ is diagonal
+                Gamma = torch.eye(V.shape[0], dtype=torch.float64) + V_aux @ V_aux.T  # O(M²N)
                 L_Gamma = torch.linalg.cholesky(Gamma)  # O(M³)
                 self.L_Sigma = self.Lss @ L_Gamma  # O(M³)
-                # print('V method | cond(L_Γ) = {:.4g}'.format(torch.linalg.cond(L_Gamma).item()))
-            case 'qr':  # QR method (most stable)
+            case 'qr':  # QR method (most reliable and expensive)
                 B = torch.cat([self.Lambda_inv.sqrt() @ Ksf.T, self.Lss.T], dim=0)  # (N + M) by M
                 _, R = stable_qr(B)  # O(M²N + M³)
                 self.L_Sigma = R.T
-                # print('QR method | cond(R) = {:.4g}'.format(torch.linalg.cond(R).item()))
         # invert_end = time.time()
-        # print('{} method | Total inversion time: {:.5g}s'.format(self.invert_mode, invert_end - invert_start))
+        # print('{} method | Total inversion time: {:.6f}'.format(self.decomp_mode, invert_end - invert_start))
 
         # compute α by doing matrix-vector multiplications first
         self.alpha = self.Lambda_inv @ self.training_outputs  # O(N) since Λ⁻¹ is diagonal
@@ -195,7 +197,7 @@ class SparseGaussianProcess(torch.nn.Module):
         # Update Σ (U_Σ)
         Lambda_inv_prime = self.__get_Lambda_inv(x_train, update=True)
         aux = Ksfprime @ Lambda_inv_prime.sqrt()
-        self.L_Sigma = cholesky_update(self.L_Sigma, aux)
+        self.L_Sigma = cholesky_update(self.L_Sigma, aux)  # use efficient Cholesky update
         self.Lambda_inv = DiagLinearOperator(torch.cat([self.Lambda_inv.diagonal(),
                                                         Lambda_inv_prime.diagonal()]))
 
@@ -236,7 +238,6 @@ class SparseGaussianProcess(torch.nn.Module):
         newLss_upper = torch.cat([self.Lss, torch.zeros(Kssprime.shape)], dim=1)
         newLss_lower = torch.cat([Lss_inv_Kssp.T, Lsp], dim=1)
         self.Lss = torch.cat([newLss_upper, newLss_lower], dim=0)
-        # print('Lss: {:.5g}'.format(torch.linalg.cond(self.Lss).item()))
 
         # Update Σ (U_Σ) with block trick
         Lambda_inv_Ksfp = self.Lambda_inv @ Kfsprime  # O(NM') since Λ⁻¹ is diagonal
@@ -249,7 +250,7 @@ class SparseGaussianProcess(torch.nn.Module):
         schur = 0.5 * (schur + schur.T)
         L, Q = torch.linalg.eigh(schur)
         schur = Q @ torch.diag(torch.clamp(L, min=0)) @ Q.T
-        L_Psi = torch.linalg.cholesky(schur + 1e-8 * torch.eye(schur.shape[0], dtype=torch.float64))
+        L_Psi = torch.linalg.cholesky(schur + 1e-8 * torch.eye(schur.shape[0], dtype=schur.dtype))
         # assemble new L_Sigma
         L_upper = torch.cat([self.L_Sigma, torch.zeros((self.L_Sigma.shape[0], L_Psi.shape[1]))], dim=1)
         L_lower = torch.cat([aux.T, L_Psi], dim=1)
@@ -316,7 +317,7 @@ class SparseGaussianProcess(torch.nn.Module):
         fit = 0.5 * self.training_outputs.unsqueeze(0) @ self.Lambda_inv
         fit = fit @ (self.training_outputs - outputscale * self.Ksf.T @ self.alpha)
         penalty = -1 * self.Lss.logdet() - 0.5 * self.Lambda_inv.logdet() + 1 * self.L_Sigma.logdet()
-        # size = self.full_descriptors.shape[1] * 0.5 * np.log(2 * np.pi)
+        size = self.full_descriptors.shape[1] * 0.5 * np.log(2 * np.pi)
         if self.sgp_mode == 'vfe':
             noise = self.__constrained_hyperparameter('noise')
             outputscale = self.__constrained_hyperparameter('outputscale')
@@ -324,9 +325,9 @@ class SparseGaussianProcess(torch.nn.Module):
             Ksf = outputscale * self.Ksf
             aux = torch.linalg.solve_triangular(self.Lss, Ksf, upper=False)
             trace = torch.sum(Kff - aux.pow(2).sum(dim=0)) / (noise.pow(2).mul(2))
-            self._nlml = penalty + fit + trace  # +size
+            self._nlml = penalty + fit + trace + size
         else:
-            self._nlml = penalty + fit  # + size
+            self._nlml = penalty + fit + size
 
     @property
     def log_marginal_likelihood(self):
@@ -350,7 +351,7 @@ class SparseGaussianProcess(torch.nn.Module):
             params += self.kernel.kernel_hyperparameters
         if relax_inducing_points:
             params.append(self.sparse_descriptors)
-
+        # initialize LBFGS optimizer
         self.optimizer = LBFGSNew(params, lr=1e-2, history_size=8, max_iter=5)
 
         def closure():
@@ -359,7 +360,7 @@ class SparseGaussianProcess(torch.nn.Module):
             if relax_inducing_points or relax_kernel_params:
                 self.Ksf = self.kernel(self.sparse_descriptors, self.full_descriptors)
                 self.Kss = self.kernel(self.sparse_descriptors, self.sparse_descriptors)
-            self.__update_Lss_Sigma_alpha()
+            self.__update_intermediates()
             self.__compute_negative_log_marginal_likelihood()
             if self._nlml.requires_grad:
                 self._nlml.backward()
