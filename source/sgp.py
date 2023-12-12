@@ -1,7 +1,6 @@
 import numpy as np
 import torch
 from linear_operator.operators import ConstantDiagLinearOperator, DiagLinearOperator
-from linear_operator.utils import stable_qr
 
 import time
 import os
@@ -50,6 +49,7 @@ class SparseGaussianProcess(torch.nn.Module):
         """
         Args:
             descriptor_dim (int)    : dimensionality of descriptor vector
+            kernel (torch.nn.module): SGP kernel object to compute covariance
             decomp_mode (str)       : c, v, qr
             sgp_mode (str)          : sor, dtc, fitc, vfe
             init_noise (float)      : noise for initialization
@@ -173,7 +173,7 @@ class SparseGaussianProcess(torch.nn.Module):
                 self.L_Sigma = self.Lss @ L_Gamma  # O(M³)
             case 'qr':  # QR method (most reliable and expensive)
                 B = torch.cat([self.Lambda_inv.sqrt() @ Ksf.T, self.Lss.T], dim=0)  # (N + M) by M
-                _, R = stable_qr(B)  # O(M²N + M³)
+                _, R = torch.linalg.qr(B)  # O(M²N + M³)
                 self.L_Sigma = R.T
         # invert_end = time.time()
         # print('{} method | Total inversion time: {:.6f}'.format(self.decomp_mode, invert_end - invert_start))
@@ -321,7 +321,8 @@ class SparseGaussianProcess(torch.nn.Module):
         outputscale = self.__constrained_hyperparameter('outputscale')
         fit = 0.5 * self.training_outputs.unsqueeze(0) @ self.Lambda_inv
         fit = fit @ (self.training_outputs - outputscale * self.Ksf.T @ self.alpha)
-        penalty = -1 * self.Lss.logdet() - 0.5 * self.Lambda_inv.logdet() + 1 * self.L_Sigma.logdet()
+        penalty = -1 * self.Lss.logdet() - 0.5 * self.Lambda_inv.logdet()
+        penalty = penalty + torch.log(torch.abs(torch.sum(self.L_Sigma.diag())))
         size = self.full_descriptors.shape[1] * 0.5 * np.log(2 * np.pi)
         if self.sgp_mode == 'vfe':
             noise = self.__constrained_hyperparameter('noise')
