@@ -1,6 +1,11 @@
 import torch
 
 
+def jitter(A, eps=1e-8):
+    jitt = eps * torch.eye(A.shape[0], dtype=A.dtype, device=A.device)
+    return A + jitt
+
+
 def howI(A):
     return torch.max(torch.abs(A - torch.eye(A.shape[0], dtype=A.dtype))).item()
 

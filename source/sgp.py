@@ -9,7 +9,7 @@ import sys
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lbfgs'))
 from lbfgsnew import LBFGSNew
 
-from utils import cholesky_update
+from utils import jitter, cholesky_update
 
 # Extensions:
 # 1. derivatives - need to redesign how SGP and Kernel classes interact
@@ -45,7 +45,8 @@ class SparseGaussianProcess(torch.nn.Module):
                  descriptor_dim, kernel,
                  decomp_mode='v', sgp_mode='dtc',
                  init_noise=1e-2, init_outputscale=1.0,
-                 noise_range=[1e-4, 2], outputscale_range=[0.1, 10]):
+                 noise_range=[1e-4, 2], outputscale_range=[0.1, 10],
+                 device='cpu'):
         """
         Args:
             descriptor_dim (int)    : dimensionality of descriptor vector
@@ -55,14 +56,17 @@ class SparseGaussianProcess(torch.nn.Module):
             init_outputscale (float): outputscale for initialization
             noise_range (list)      : noise hyperparameter range
             outputscale_range (list): outputscale hyperparameter range
+            device (torch.device)   : device (default is cpu)
         """
         super().__init__()
-        # model data (maybe data should be kernel attributes)
-        self.full_descriptors = torch.empty((descriptor_dim, 0))
-        self.sparse_descriptors = torch.empty((descriptor_dim, 0))
-        self.training_outputs = torch.empty((0,))
 
+        self.device = device
         self.kernel = kernel
+
+        # SGP dataset and sparse inducing points
+        self.full_descriptors = torch.empty((descriptor_dim, 0), dtype=torch.float64, device=self.device)
+        self.sparse_descriptors = torch.empty((descriptor_dim, 0), dtype=torch.float64, device=self.device)
+        self.training_outputs = torch.empty((0,), dtype=torch.float64, device=self.device)
 
         # basic SGP hyperparameters (noise and outputscale)
         assert ((noise_range[0] > 1e-16) & (noise_range[1] > 1e-16)
@@ -73,18 +77,19 @@ class SparseGaussianProcess(torch.nn.Module):
         assert outputscale_range[0] < init_outputscale < outputscale_range[1]
         self.noise_range = noise_range
         self.outputscale_range = outputscale_range
-        self._noise = self.__convert_hyperparameter(torch.tensor([init_noise], dtype=torch.float64), noise_range)
-        self._outputscale = self.__convert_hyperparameter(torch.tensor([init_outputscale], dtype=torch.float64),
-                                                          outputscale_range)
+        noise = torch.tensor([init_noise], dtype=torch.float64, device=self.device)
+        self._noise = self.__convert_hyperparameter(noise, noise_range)
+        outputscale = torch.tensor([init_outputscale], dtype=torch.float64, device=self.device)
+        self._outputscale = self.__convert_hyperparameter(outputscale, outputscale_range)
 
-        # inversion mode for Sigma and SGP approximations
+        # Sigma Cholesky decomposition mode for Sigma and SGP approximations
         assert decomp_mode in ['c', 'v', 'qr'], 'decomp_mode {} not supported \
                                                  only \'c\', \'v\', \'qr\' supported'.format(decomp_mode)
         self.decomp_mode = decomp_mode
         assert sgp_mode in ['sor', 'dtc', 'fitc', 'vfe'], 'only \'sor\', \'dtc\', \'fitc\', \'vfe\' supported'
         self.sgp_mode = sgp_mode
 
-        # covariance matrices
+        # unscaled covariance matrices
         self.Kss = None
         self.Ksf = None
 
@@ -151,7 +156,7 @@ class SparseGaussianProcess(torch.nn.Module):
         Ksf = outputscale * self.Ksf
         Kss = outputscale * self.Kss
         # Cholesky decompose Kss with jitter
-        self.Lss = torch.linalg.cholesky(Kss + torch.eye(Kss.shape[0]) * 1e-8)  # O(M³)
+        self.Lss = torch.linalg.cholesky(jitter(Kss))  # O(M³)
         # get Λ⁻¹
         self.Lambda_inv = self.__get_Lambda_inv(self.full_descriptors)
 
@@ -159,12 +164,11 @@ class SparseGaussianProcess(torch.nn.Module):
         match self.decomp_mode:
             case 'c':  # direct Cholesky factorization (least reliable but cheap)
                 Sigma = Kss + Ksf @ self.Lambda_inv @ Ksf.T  # O(M²N)
-                Sigma = Sigma + 1e-8 * torch.eye(self.sparse_descriptors.shape[1])
-                self.L_Sigma = torch.linalg.cholesky(Sigma)  # O(M³)
+                self.L_Sigma = torch.linalg.cholesky(jitter(Sigma))  # O(M³)
             case 'v':  # V method (reasonably reliable and moderately expensive)
                 V = torch.linalg.solve_triangular(self.Lss, Ksf, upper=False)  # O(M²N)
                 V_aux = V @ self.Lambda_inv.sqrt()  # O(MN) since Λ⁻¹ is diagonal
-                Gamma = torch.eye(V.shape[0], dtype=torch.float64) + V_aux @ V_aux.T  # O(M²N)
+                Gamma = jitter(V_aux @ V_aux.T, eps=1)  # O(M²N)
                 L_Gamma = torch.linalg.cholesky(Gamma)  # O(M³)
                 self.L_Sigma = self.Lss @ L_Gamma  # O(M³)
             case 'qr':  # QR method (most reliable and expensive)
@@ -233,9 +237,9 @@ class SparseGaussianProcess(torch.nn.Module):
 
         # update Lss with block trick
         Lss_inv_Kssp = torch.linalg.solve_triangular(self.Lss, Kssprime, upper=False)  # O(M²M')
-        Lsp = torch.linalg.cholesky(Ksprimesprime - Lss_inv_Kssp.T @ Lss_inv_Kssp
-                                    + torch.eye(Ksprimesprime.shape[0]) * 1e-8)  # O(M'³)
-        newLss_upper = torch.cat([self.Lss, torch.zeros(Kssprime.shape)], dim=1)
+        Lsp = torch.linalg.cholesky(jitter(Ksprimesprime - Lss_inv_Kssp.T @ Lss_inv_Kssp))  # O(M'³)
+        zero_block = torch.zeros(Kssprime.shape, dtype=Kssprime.dtype, device=self.device)
+        newLss_upper = torch.cat([self.Lss, zero_block], dim=1)
         newLss_lower = torch.cat([Lss_inv_Kssp.T, Lsp], dim=1)
         self.Lss = torch.cat([newLss_upper, newLss_lower], dim=0)
 
@@ -250,9 +254,10 @@ class SparseGaussianProcess(torch.nn.Module):
         schur = 0.5 * (schur + schur.T)
         L, Q = torch.linalg.eigh(schur)
         schur = Q @ torch.diag(torch.clamp(L, min=0)) @ Q.T
-        L_Psi = torch.linalg.cholesky(schur + 1e-8 * torch.eye(schur.shape[0], dtype=schur.dtype))
+        L_Psi = torch.linalg.cholesky(jitter(schur))
         # assemble new L_Sigma
-        L_upper = torch.cat([self.L_Sigma, torch.zeros((self.L_Sigma.shape[0], L_Psi.shape[1]))], dim=1)
+        zero_block = torch.zeros((self.L_Sigma.shape[0], L_Psi.shape[1]), dtype=L_Psi.dtype, device=self.device)
+        L_upper = torch.cat([self.L_Sigma, zero_block], dim=1)
         L_lower = torch.cat([aux.T, L_Psi], dim=1)
         self.L_Sigma = torch.cat([L_upper, L_lower], dim=0)
 
@@ -275,7 +280,7 @@ class SparseGaussianProcess(torch.nn.Module):
         # handle possibility of inference with uninitialized model
         if (self.full_descriptors.shape[1] == 0):
             if mean_var[0]:
-                mean = torch.zeros(x_test.shape[1], dtype=torch.float64)
+                mean = torch.zeros(x_test.shape[1], dtype=torch.float64, device=self.device)
                 predictions.append(mean)
             if mean_var[1]:
                 noise = self.__constrained_hyperparameter('noise')

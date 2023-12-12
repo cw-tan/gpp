@@ -2,8 +2,9 @@ import torch
 
 
 class Kernel(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, device='cpu'):
         super().__init__()
+        self.device = device
         self.kernel_hyperparameters = None
 
     def get_duplicate_ids(self, x1, x2, tol=1e-8):
@@ -21,7 +22,9 @@ class Kernel(torch.nn.Module):
             x_larger, x_smaller = x1, x2
         else:
             x_larger, x_smaller = x2, x1
-        triu_ids = torch.triu_indices(x_smaller.shape[1], x_larger.shape[1], offset=int(torch.equal(x1, x2)))
+        triu_ids = torch.triu_indices(x_smaller.shape[1], x_larger.shape[1],
+                                      offset=int(torch.equal(x1, x2)),
+                                      device=self.device)
         K = self(x_smaller, x_larger)
         duplicate_triu_ids = torch.nonzero((1 - K[triu_ids[0], triu_ids[1]]) < tol, as_tuple=True)[0]
         if x1.shape[1] > x2.shape[1]:
@@ -47,9 +50,9 @@ class SquaredExponentialKernel(Kernel):
     """
     Squared exponential (i.e. Gaussian) kernel.
     """
-    def __init__(self, lengthscale=1.0):
-        super().__init__()
-        self.lengthscale = torch.tensor([lengthscale], dtype=torch.float64)
+    def __init__(self, lengthscale=1.0, device='cpu'):
+        super().__init__(device=device)
+        self.lengthscale = torch.tensor([lengthscale], dtype=torch.float64, device=self.device)
         self.kernel_hyperparameters = [self.lengthscale]
 
     def forward(self, x1, x2, diag=False):
