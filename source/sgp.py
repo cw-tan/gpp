@@ -280,7 +280,7 @@ class SparseGaussianProcess(torch.nn.Module):
         # handle possibility of inference with uninitialized model
         if (self.full_descriptors.shape[1] == 0):
             if mean_var[0]:
-                mean = torch.zeros(x_test.shape[1], dtype=torch.float64, device=self.device)
+                mean = torch.zeros(x_test.shape[1], dtype=x_test.dtype, device=self.device)
                 predictions.append(mean)
             if mean_var[1]:
                 noise = self.__constrained_hyperparameter('noise')

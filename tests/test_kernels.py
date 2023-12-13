@@ -13,6 +13,7 @@ class TestKernelFunctions(unittest.TestCase):
         self.kernel = SquaredExponentialKernel()
 
     def test_duplicate_handling(self):
+        print('Testing kernel duplicate handling ...')
         x1 = torch.tensor([1, 2, 3, 4, 5, 8], dtype=torch.float64)
         x2 = torch.tensor([1 - 1e-8, 2.25, 2.5, 3, 4 + 1e-9, 5.5, 6, 7, 8 + 1e-8],
                           dtype=torch.float64)
@@ -39,6 +40,7 @@ class TestKernelFunctions(unittest.TestCase):
         self.assertTrue(torch.equal(duplicate_ids, torch.tensor([3])))
         x3_clean = self.kernel.remove_duplicates(torch.atleast_2d(x3), torch.atleast_2d(x3), tol=1e-8)
         self.assertTrue(torch.equal(x3_clean, torch.atleast_2d(torch.tensor([1, 2, 3, 4, 5], dtype=torch.float64))))
+        print('Kernel duplicate handling works as expected')
 
 
 if __name__ == '__main__':

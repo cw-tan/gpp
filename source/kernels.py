@@ -39,7 +39,7 @@ class Kernel(torch.nn.Module):
         within some tolerance.
         """
         ids_to_remove = self.get_duplicate_ids(x1, x2, tol)
-        mask = torch.ones(x2.shape[1], dtype=torch.bool)
+        mask = torch.ones(x2.shape[1], dtype=torch.bool, device=x1.device)
         mask[ids_to_remove] = False
         all_ids = torch.arange(x2.shape[1])
         ids_to_keep = all_ids[mask]
