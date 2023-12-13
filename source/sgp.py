@@ -1,6 +1,5 @@
 import numpy as np
 import torch
-from linear_operator.operators import ConstantDiagLinearOperator, DiagLinearOperator
 
 import time
 import os
@@ -11,7 +10,7 @@ from lbfgsnew import LBFGSNew
 from utils import jitter, cholesky_update
 
 # Extensions:
-# 1. derivatives - need to redesign how SGP and Kernel classes interact
+# 1. derivatives (changes in kernel)
 
 # Low priority aesthetic/user-friendliness TODOs:
 # 1. proper torch.nn parameter monitoring (may make code cleaner, but more complex)
@@ -163,24 +162,24 @@ class SparseGaussianProcess(torch.nn.Module):
         # invert_start = time.time()
         match self.decomp_mode:
             case 'c':  # direct Cholesky factorization (least reliable but cheap)
-                Sigma = Kss + Ksf @ self.Lambda_inv @ Ksf.T  # O(M²N)
+                Sigma = Kss + (Ksf * self.Lambda_inv) @ Ksf.T  # O(M²N)
                 self.L_Sigma = torch.linalg.cholesky(jitter(Sigma))  # O(M³)
             case 'v':  # V method (reasonably reliable and moderately expensive)
                 V = torch.linalg.solve_triangular(self.Lss, Ksf, upper=False)  # O(M²N)
-                V_aux = V @ self.Lambda_inv.sqrt()  # O(MN) since Λ⁻¹ is diagonal
+                V_aux = V * self.Lambda_inv.sqrt()  # O(MN) since Λ⁻¹ is diagonal
                 Gamma = jitter(V_aux @ V_aux.T, eps=1)  # O(M²N)
                 L_Gamma = torch.linalg.cholesky(Gamma)  # O(M³)
                 self.L_Sigma = self.Lss @ L_Gamma  # O(M³)
             case 'qr':  # QR method (most reliable and expensive)
-                B = torch.cat([self.Lambda_inv.sqrt() @ Ksf.T, self.Lss.T], dim=0)  # (N + M) by M
+                B = torch.cat([(Ksf * self.Lambda_inv.sqrt()).T, self.Lss.T], dim=0)  # (N + M) by M
                 _, R = torch.linalg.qr(B)  # O(M²N + M³)
                 self.L_Sigma = R.T
         # invert_end = time.time()
         # print('{} method | Total inversion time: {:.6f}'.format(self.decomp_mode, invert_end - invert_start))
 
         # compute α by doing matrix-vector multiplications first
-        self.alpha = self.Lambda_inv @ self.training_outputs  # O(N) since Λ⁻¹ is diagonal
-        self.alpha = Ksf @ self.alpha  # O(MN)
+        self.alpha = self.Lambda_inv * self.training_outputs  # O(N) since Λ⁻¹ is diagonal
+        self.alpha = torch.sum(Ksf * self.alpha, dim=1)  # O(MN)
         self.alpha = torch.linalg.solve_triangular(self.L_Sigma, self.alpha.unsqueeze(-1), upper=False)  # O(M²)
         self.alpha = torch.linalg.solve_triangular(self.L_Sigma.T, self.alpha, upper=True)[:, 0]  # O(M²)
 
@@ -200,14 +199,13 @@ class SparseGaussianProcess(torch.nn.Module):
 
         # Update Σ (U_Σ)
         Lambda_inv_prime = self.__get_Lambda_inv(x_train, update=True)
-        aux = Ksfprime @ Lambda_inv_prime.sqrt()
+        aux = Ksfprime * Lambda_inv_prime.sqrt()
         self.L_Sigma = cholesky_update(self.L_Sigma, aux)  # use efficient Cholesky update
-        self.Lambda_inv = DiagLinearOperator(torch.cat([self.Lambda_inv.diagonal(),
-                                                        Lambda_inv_prime.diagonal()]))
+        self.Lambda_inv = torch.cat([self.Lambda_inv, Lambda_inv_prime])
 
         # compute α by doing matrix-vector multiplications first
-        self.alpha = self.Lambda_inv @ self.training_outputs  # O(N) since Λ⁻¹ is diagonal
-        self.alpha = Ksf @ self.alpha  # O(MN)
+        self.alpha = self.Lambda_inv * self.training_outputs  # O(N) since Λ⁻¹ is diagonal
+        self.alpha = torch.sum(Ksf * self.alpha, dim=1)  # O(MN)
         self.alpha = torch.linalg.solve_triangular(self.L_Sigma, self.alpha.unsqueeze(-1), upper=False)  # O(M²)
         self.alpha = torch.linalg.solve_triangular(self.L_Sigma.T, self.alpha, upper=True)[:, 0]  # O(M²)
 
@@ -244,10 +242,9 @@ class SparseGaussianProcess(torch.nn.Module):
         self.Lss = torch.cat([newLss_upper, newLss_lower], dim=0)
 
         # Update Σ (U_Σ) with block trick
-        Lambda_inv_Ksfp = self.Lambda_inv @ Kfsprime  # O(NM') since Λ⁻¹ is diagonal
-        B = Kssprime + Ksf_prev @ Lambda_inv_Ksfp  # O(NMM')
-        Lambda_inv_root_Kfsp = self.Lambda_inv.sqrt() @ Kfsprime  # O(NM') since Λ⁻¹ is diagonal
-        C = Ksprimesprime + Lambda_inv_root_Kfsp.T @ Lambda_inv_root_Kfsp  # O(N²M')
+        B = Kssprime + (Ksf_prev * self.Lambda_inv) @ Kfsprime  # O(NMM')
+        Kspf_Lamda_inv_root = Kfsprime.T * self.Lambda_inv.sqrt()  # O(NM') since Λ⁻¹ is diagonal
+        C = Ksprimesprime + Kspf_Lamda_inv_root @ Kspf_Lamda_inv_root.T  # O(N²M')
         aux = torch.linalg.solve_triangular(self.L_Sigma, B, upper=False)  # O(M²M')
         schur = C - aux.T @ aux  # O(MM'²)
         # get nearest psd schur (https://doi.org/10.1016/0024-3795(88)90223-6)
@@ -261,8 +258,8 @@ class SparseGaussianProcess(torch.nn.Module):
         L_lower = torch.cat([aux.T, L_Psi], dim=1)
         self.L_Sigma = torch.cat([L_upper, L_lower], dim=0)
 
-        self.alpha = self.Lambda_inv @ self.training_outputs  # O(N) since Λ⁻¹ is diagonal
-        self.alpha = outputscale * self.Ksf @ self.alpha  # O(MN)
+        self.alpha = self.Lambda_inv * self.training_outputs  # O(N) since Λ⁻¹ is diagonal
+        self.alpha = torch.sum(outputscale * self.Ksf * self.alpha, dim=1)  # O(MN)
         self.alpha = torch.linalg.solve_triangular(self.L_Sigma, self.alpha.unsqueeze(-1), upper=False)  # O(M²)
         self.alpha = torch.linalg.solve_triangular(self.L_Sigma.T, self.alpha, upper=True)[:, 0]  # O(M²)
 
@@ -319,9 +316,9 @@ class SparseGaussianProcess(torch.nn.Module):
         TODO: decide whether the include size term
         """
         outputscale = self.__constrained_hyperparameter('outputscale')
-        fit = 0.5 * self.training_outputs.unsqueeze(0) @ self.Lambda_inv
-        fit = fit @ (self.training_outputs - outputscale * self.Ksf.T @ self.alpha)
-        penalty = -1 * self.Lss.logdet() - 0.5 * self.Lambda_inv.logdet()
+        aux = self.training_outputs - outputscale * self.Ksf.T @ self.alpha
+        fit = 0.5 * torch.dot(self.training_outputs, self.Lambda_inv * aux)
+        penalty = -1 * self.Lss.logdet() - 0.5 * torch.sum(torch.log(self.Lambda_inv))
         penalty = penalty + torch.log(torch.abs(torch.sum(self.L_Sigma.diag())))
         size = self.full_descriptors.shape[1] * 0.5 * np.log(2 * np.pi)
         if self.sgp_mode == 'vfe':
@@ -422,7 +419,7 @@ class SparseGaussianProcess(torch.nn.Module):
         noise = self.__constrained_hyperparameter('noise')
         match self.sgp_mode:
             case 'sor' | 'dtc' | 'vfe':
-                return ConstantDiagLinearOperator(noise.pow(-2), size)
+                return noise.pow(-2).expand(size)
             case 'fitc':
                 outputscale = self.__constrained_hyperparameter('outputscale')
                 Kff = outputscale * self.kernel(full_set, full_set, diag=True)
@@ -433,7 +430,7 @@ class SparseGaussianProcess(torch.nn.Module):
                 aux = torch.linalg.solve_triangular(self.Lss, Ksf, upper=False)
                 Lambda_diag = Kff - aux.pow(2).sum(dim=0)
                 Lambda_diag = Lambda_diag + noise.pow(2).expand(size)
-                return DiagLinearOperator(Lambda_diag).inverse()
+                return Lambda_diag.pow(-1)
 
     def __constrained_hyperparameter(self, hyperparameter):
         match hyperparameter:

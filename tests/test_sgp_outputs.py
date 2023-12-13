@@ -20,8 +20,7 @@ class TestSGPOutputs(unittest.TestCase):
         x_train = L * (2 * torch.rand(1000, dtype=torch.float64) - 1)
         self.y_train = func(x_train)
         self.x_train = torch.atleast_2d(x_train)
-        x_sparse = torch.atleast_2d(x_train[torch.randperm(len(x_train))[:200]])
-        self.x_sparse = self.kernel.remove_duplicates(x_sparse, x_sparse, tol=1e-6)
+        self.x_sparse = torch.atleast_2d(x_train[torch.randperm(len(x_train))[:200]])
         self.x_test = torch.atleast_2d(torch.linspace(-L - 1, L + 1, 1000, dtype=torch.float64))
 
     def test_updates(self):
