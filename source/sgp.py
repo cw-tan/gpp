@@ -1,22 +1,12 @@
 import numpy as np
 import torch
 
-import time
 import os
 import sys
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lbfgs'))
 from lbfgsnew import LBFGSNew
 
 from utils import jitter, cholesky_update
-
-# Extensions:
-# 1. derivatives (changes in kernel)
-
-# Low priority aesthetic/user-friendliness TODOs:
-# 1. proper torch.nn parameter monitoring (may make code cleaner, but more complex)
-# 2. clean up docstrings
-# 3. verbosity for operations? timing etc? may clutter code though
-# 4. logging for timing and predictions for active learning
 
 
 class SparseGaussianProcess(torch.nn.Module):
@@ -95,7 +85,7 @@ class SparseGaussianProcess(torch.nn.Module):
         # intermediate GP terms
         self.Lambda_inv = None
         self.Lss = None
-        self.Sigma = None
+        self.L_Sigma = None
         self.alpha = None
         self._nlml = None
 
@@ -346,7 +336,7 @@ class SparseGaussianProcess(torch.nn.Module):
         if relax_inducing_points:
             params.append(self.sparse_descriptors)
         # initialize LBFGS optimizer
-        self.optimizer = LBFGSNew(params, lr=1e-2, history_size=8, max_iter=5)
+        self.optimizer = LBFGSNew(params, lr=2e-3, history_size=8, max_iter=5)
 
         def closure():
             if torch.is_grad_enabled():
@@ -426,13 +416,14 @@ class SparseGaussianProcess(torch.nn.Module):
     def __constrained_hyperparameter(self, hyperparameter):
         match hyperparameter:
             case 'outputscale':
-                return self.outputscale_range[0] + self.outputscale_range[1] * torch.sigmoid(self._outputscale)
+                return self.outputscale_range[0] + \
+                       (self.outputscale_range[1] - self.outputscale_range[0]) * torch.sigmoid(self._outputscale)
             case 'noise':
-                return self.noise_range[0] + self.noise_range[1] * torch.sigmoid(self._noise)
+                return self.noise_range[0] + (self.noise_range[1] - self.noise_range[0]) * torch.sigmoid(self._noise)
 
     def __convert_hyperparameter(self, hparam, param_range):
         # used for initializing hyperparameters
-        return - torch.log((param_range[1] / (hparam - param_range[0])) - 1)
+        return - torch.log(((param_range[1] - param_range[0]) / (hparam - param_range[0])) - 1)
 
     @property
     def noise(self):

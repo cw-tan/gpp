@@ -12,15 +12,15 @@ def cholesky_update(L, V):
     Triangular factors of modified matrices. Communications of the ACM, 11(1), 12.
     """
     W = V.clone()
-    c = torch.eye(W.shape[1], dtype=W.dtype)
+    c = torch.eye(W.shape[1], dtype=W.dtype, device=L.device)
     for i in range(L.shape[0]):
         d = L[i, i].clone()
-        p = torch.sum(c * W[i, :], dim=1)
-        L[i, i] = torch.sqrt(d.pow(2) + torch.sum(W[i, :] * p))
+        p = torch.mv(c, W[i, :])
+        L[i, i] = torch.sqrt(d.pow(2) + torch.dot(W[i, :], p))
         p /= L[i, i]
         L[(i + 1):, i] = L[(i + 1):, i] / d
         W[(i + 1):, :] -= torch.outer(L[(i + 1):, i], W[i, :])
-        L[(i + 1):, i] = L[i, i] * L[(i + 1):, i] + torch.sum(W[(i + 1):, :] * p, dim=1)
+        L[(i + 1):, i] = L[i, i] * L[(i + 1):, i] + torch.mv(W[(i + 1):, :], p)
         c -= torch.outer(p, p)
     return L
 

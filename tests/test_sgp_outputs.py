@@ -43,10 +43,10 @@ class TestSGPOutputs(unittest.TestCase):
                 mean1, var1 = SGP1(self.x_test, mean_var=[True, True], include_noise=False)
                 mean2, var2 = SGP2(self.x_test, mean_var=[True, True], include_noise=False)
 
-                #print(torch.mean(torch.abs(mean1 - mean2)).item())
-                #print(torch.max(torch.abs(mean1 - mean2)).item())
-                #print(torch.mean(torch.abs(var1 - var2)).item())
-                #print(torch.max(torch.abs(var1 - var2)).item())
+                assert torch.max(torch.abs(SGP1.Lss @ SGP1.Lss.T - SGP2.Lss @ SGP2.Lss.T)) < 1e-14
+                assert torch.max(torch.abs(SGP1.L_Sigma @ SGP1.L_Sigma.T - SGP2.L_Sigma @ SGP2.L_Sigma.T)) < 1e-8
+
+                # about 1e-5 precision lost
                 assert torch.max(torch.abs(mean1 - mean2)) < 5e-3
                 assert torch.max(torch.abs(var1 - var2)) < 5e-3
         print('Efficient updates work as expected')

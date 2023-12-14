@@ -41,7 +41,7 @@ class Kernel(torch.nn.Module):
         ids_to_remove = self.get_duplicate_ids(x1, x2, tol)
         mask = torch.ones(x2.shape[1], dtype=torch.bool, device=x1.device)
         mask[ids_to_remove] = False
-        all_ids = torch.arange(x2.shape[1])
+        all_ids = torch.arange(x2.shape[1], device=x1.device)
         ids_to_keep = all_ids[mask]
         return x2[:, ids_to_keep]
 
