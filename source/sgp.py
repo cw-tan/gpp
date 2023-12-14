@@ -166,8 +166,7 @@ class SparseGaussianProcess(torch.nn.Module):
 
         # compute α by doing matrix-vector multiplications first
         self.alpha = torch.mv(Ksf, self.Lambda_inv * self.training_outputs)  # O(MN)
-        self.alpha = torch.linalg.solve_triangular(self.L_Sigma, self.alpha.unsqueeze(-1), upper=False)  # O(M²)
-        self.alpha = torch.linalg.solve_triangular(self.L_Sigma.T, self.alpha, upper=True)[:, 0]  # O(M²)
+        self.alpha = torch.cholesky_solve(self.alpha.unsqueeze(-1), self.L_Sigma, upper=False)[:, 0]  # O(M²)
 
     def __update_full_set(self, x_train, y_train):
         """
@@ -191,8 +190,7 @@ class SparseGaussianProcess(torch.nn.Module):
 
         # compute α by doing matrix-vector multiplications first
         self.alpha = torch.mv(Ksf, self.Lambda_inv * self.training_outputs)  # O(MN)
-        self.alpha = torch.linalg.solve_triangular(self.L_Sigma, self.alpha.unsqueeze(-1), upper=False)  # O(M²)
-        self.alpha = torch.linalg.solve_triangular(self.L_Sigma.T, self.alpha, upper=True)[:, 0]  # O(M²)
+        self.alpha = torch.cholesky_solve(self.alpha.unsqueeze(-1), self.L_Sigma, upper=False)[:, 0]  # O(M²)
 
     def __update_sparse_set(self, x_sparse):
         """
@@ -244,8 +242,7 @@ class SparseGaussianProcess(torch.nn.Module):
         self.L_Sigma = torch.cat([L_upper, L_lower], dim=0)
 
         self.alpha = torch.mv(outputscale * self.Ksf, self.Lambda_inv * self.training_outputs)  # O(MN)
-        self.alpha = torch.linalg.solve_triangular(self.L_Sigma, self.alpha.unsqueeze(-1), upper=False)  # O(M²)
-        self.alpha = torch.linalg.solve_triangular(self.L_Sigma.T, self.alpha, upper=True)[:, 0]  # O(M²)
+        self.alpha = torch.cholesky_solve(self.alpha.unsqueeze(-1), self.L_Sigma, upper=False)[:, 0]  # O(M²)
 
     def forward(self, x_test, mean_var=[True, True], include_noise=False):
         """
