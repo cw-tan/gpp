@@ -33,7 +33,7 @@ print(SGP.device)
 
 print(SGP.outputscale, SGP.noise)
 
-x_train = L * (2 * torch.rand(50, dtype=torch.float64, device=device) - 1)
+x_train = L * (2 * torch.rand(10, dtype=torch.float64, device=device) - 1)
 y_train = func(x_train)
 plt.plot(x_train.cpu(), y_train.cpu(), 'ko')
 
@@ -42,23 +42,24 @@ SGP.update_model(torch.atleast_2d(x_train), y_train, x_sparse)
 plt.plot(x_train.cpu(), y_train.cpu(), 'ko', label='Training Points')
 
 
-for i in range(3):
-    x_train = L * (2 * torch.rand(20, dtype=torch.float64, device=device) - 1)
+for i in range(10):
+    x_train = L * (2 * torch.rand(10, dtype=torch.float64, device=device) - 1)
     y_train = func(x_train)
     plt.plot(x_train.cpu(), y_train.cpu(), 'ko')
     x_train = torch.atleast_2d(x_train)
     x_sparse_new = kernel.remove_duplicates(x_train, x_train, tol=1e-1)
     x_sparse_new = kernel.remove_duplicates(SGP.sparse_descriptors, x_sparse_new, tol=1e-1)
+    #print(x_sparse_new.shape)
     SGP.update_model(x_train, y_train, x_sparse_new)
 
 
 x_sparse = SGP.sparse_descriptors
 plt.plot(x_sparse[0,:].cpu(), torch.full((x_sparse.shape[1], ), -3), 'b^', label='Initial Inducing Points', markersize=15)
 
-#steps = SGP.optimize_hyperparameters(rtol=1e-4, relax_inducing_points=True, relax_kernel_params=False)
+steps = SGP.optimize_hyperparameters(rtol=1e-4, relax_inducing_points=True, relax_kernel_params=False)
 #print(steps)
-#steps = SGP.optimize_hyperparameters(rtol=1e-4, relax_inducing_points=False, relax_kernel_params=True)
-#print(SGP.kernel.lengthscale)
+steps = SGP.optimize_hyperparameters(rtol=1e-4, relax_inducing_points=False, relax_kernel_params=True)
+print(SGP.kernel.lengthscale)
 
 x_sparse = SGP.sparse_descriptors
 plt.plot(x_sparse[0,:].cpu(), torch.full((x_sparse.shape[1], ), -2.5), 'g^', label='Optimized Inducing Points', markersize=15)
