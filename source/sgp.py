@@ -72,10 +72,11 @@ class SparseGaussianProcess(torch.nn.Module):
         self._outputscale = self.__convert_hyperparameter(outputscale, outputscale_range)
 
         # Sigma Cholesky decomposition mode for Sigma and SGP approximations
-        assert decomp_mode in ['c', 'v', 'qr'], 'decomp_mode {} not supported \
-                                                 only \'c\', \'v\', \'qr\' supported'.format(decomp_mode)
+        assert decomp_mode in ['c', 'v', 'qr'], \
+            'decomp_mode {} not supported, only \'c\', \'v\', \'qr\' supported'.format(decomp_mode)
         self.decomp_mode = decomp_mode
-        assert sgp_mode in ['sor', 'dtc', 'fitc', 'vfe'], 'only \'sor\', \'dtc\', \'fitc\', \'vfe\' supported'
+        assert sgp_mode in ['sor', 'dtc', 'fitc', 'vfe'], \
+            'sgp_mode {} not supported, only \'sor\', \'dtc\', \'fitc\', \'vfe\' supported'.format(sgp_mode)
         self.sgp_mode = sgp_mode
 
         # unscaled covariance matrices
@@ -242,9 +243,8 @@ class SparseGaussianProcess(torch.nn.Module):
         # get nearest psd schur (https://doi.org/10.1016/0024-3795(88)90223-6)
         schur = 0.5 * (schur + schur.T)
         L, Q = torch.linalg.eigh(schur)
-        if torch.any(L < 1e-8):
-            schur_root = Q * torch.clamp(L, min=0).sqrt()
-            schur = schur_root @ schur_root.T
+        schur_root = Q * torch.clamp(L, min=0).sqrt()
+        schur = schur_root @ schur_root.T
         L_Psi = torch.linalg.cholesky(jitter(schur))
         # assemble new L_Sigma
         zero_block = torch.zeros((self.L_Sigma.shape[0], L_Psi.shape[1]), dtype=L_Psi.dtype, device=self.device)

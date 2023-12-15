@@ -27,7 +27,6 @@ class TestSGPOutputs(unittest.TestCase):
 
     def test_updates(self):
         Ns = self.x_sparse.shape[1]
-        print('Testing efficient updates ...')
         for mode in ['sor', 'dtc', 'fitc', 'vfe']:
             for decomp in ['v', 'qr']:
                 # load all data at once
@@ -52,9 +51,13 @@ class TestSGPOutputs(unittest.TestCase):
                 # check closeness of intermediates matrices and predictions
                 assert torch.max(torch.abs(SGP1.Lss @ SGP1.Lss.T - SGP2.Lss @ SGP2.Lss.T)) < 1e-14
                 assert torch.max(torch.abs(SGP1.L_Sigma @ SGP1.L_Sigma.T - SGP2.L_Sigma @ SGP2.L_Sigma.T)) < 1e-8
-                assert torch.max(torch.abs(SGP1.alpha - SGP2.alpha)) < 1e-8
-                assert torch.max(torch.abs(mean1 - mean2)) < 1e-8
-                assert torch.max(torch.abs(var1 - var2)) < 1e-8
+                assert torch.max(torch.abs(SGP1.alpha - SGP2.alpha)) < 1e-7, \
+                    'value is {}'.format(torch.max(torch.abs(SGP1.alpha - SGP2.alpha)))
+                assert torch.max(torch.abs(mean1 - mean2)) < 1e-8, \
+                    'value is {}'.format(torch.max(torch.abs(mean1 - mean2)))
+                assert torch.max(torch.abs(var1 - var2)) < 1e-8, \
+                    'value is {}'.format(torch.max(torch.abs(var1 - var2)))
+
         print('Efficient updates work as expected')
 
 

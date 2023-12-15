@@ -23,6 +23,8 @@ class TestDuplicateHandling(unittest.TestCase):
         assert (SGP.noise - 56.78910) < 1e-14
         assert (SGP.outputscale - 9.876) < 1e-14
 
+        print('SGP initialization works as expected')
+
 
 if __name__ == '__main__':
     unittest.main()

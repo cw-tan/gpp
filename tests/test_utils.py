@@ -10,7 +10,6 @@ from utils import cholesky_update
 class TestUtils(unittest.TestCase):
 
     def test_chol_updates(self):
-        print('Testing Cholesky updates ...')
 
         def test_rankN(N, M):
             A = torch.rand((N, N), dtype=torch.float64)

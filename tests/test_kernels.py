@@ -13,7 +13,6 @@ class TestKernelFunctions(unittest.TestCase):
         self.kernel = SquaredExponentialKernel()
 
     def test_duplicate_handling(self):
-        print('Testing kernel duplicate handling ...')
         x1 = torch.tensor([1, 2, 3, 4, 5, 8], dtype=torch.float64)
         x2 = torch.tensor([1 - 1e-8, 2.25, 2.5, 3, 4 + 1e-9, 5.5, 6, 7, 8 + 1e-8],
                           dtype=torch.float64)
