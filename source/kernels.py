@@ -14,20 +14,20 @@ class Kernel(torch.nn.Module):
         keep x1 as is and remove the duplicate indices from x2).
 
         Args:
-            x1, x2 (torch.Tensor): d × m tensors where d is the dimensionality and m is the number
-                                   of descriptor vectors
+            x1, x2 (torch.Tensor): M × D tensors where M is the number of descriptor vectors
+                                   and D is the dimensionality
             tol (float)          : how close the entries of K(x1, x2) are to 1
         """
-        if x1.shape[1] > x2.shape[1]:
+        if x1.shape[0] > x2.shape[0]:
             x_larger, x_smaller = x1, x2
         else:
             x_larger, x_smaller = x2, x1
-        triu_ids = torch.triu_indices(x_smaller.shape[1], x_larger.shape[1],
+        triu_ids = torch.triu_indices(x_smaller.shape[0], x_larger.shape[0],
                                       offset=int(torch.equal(x1, x2)),
                                       device=self.device)
         K = self(x_smaller, x_larger)
         duplicate_triu_ids = torch.nonzero((1 - K[triu_ids[0], triu_ids[1]]) < tol, as_tuple=True)[0]
-        if x1.shape[1] > x2.shape[1]:
+        if x1.shape[0] > x2.shape[0]:
             duplicate_ids = triu_ids[0][duplicate_triu_ids]
         else:
             duplicate_ids = triu_ids[1][duplicate_triu_ids]
@@ -39,11 +39,11 @@ class Kernel(torch.nn.Module):
         within some tolerance.
         """
         ids_to_remove = self.get_duplicate_ids(x1, x2, tol)
-        mask = torch.ones(x2.shape[1], dtype=torch.bool, device=x1.device)
+        mask = torch.ones(x2.shape[0], dtype=torch.bool, device=x1.device)
         mask[ids_to_remove] = False
-        all_ids = torch.arange(x2.shape[1], device=x1.device)
+        all_ids = torch.arange(x2.shape[0], device=x1.device)
         ids_to_keep = all_ids[mask]
-        return x2[:, ids_to_keep]
+        return x2[ids_to_keep, :]
 
 
 class SquaredExponentialKernel(Kernel):
@@ -57,22 +57,18 @@ class SquaredExponentialKernel(Kernel):
 
     def forward(self, x1, x2, diag=False):
         """
-        x1 (torch.Tensor): d × m tensor where m is the number of x vectors and d is the
-                           dimensionality of the x vectors
-        x2 (torch.Tensor): d × n tensor n where is the number of x vectors and d is the
-                           dimensionality of the x vectors
-        diag (bool)      : whether to only evaluate diagonal components
+        x1, x2 (torch.Tensor): N/M × D tensors where N/M is the number of descriptor vectors
+                               and D is the dimensionality
+        diag (bool)          : whether to only evaluate diagonal components
         """
         assert torch.is_tensor(x1) and torch.is_tensor(x2), 'x1 and x2 must be torch.Tensor'
-        assert 0 < len(x1.shape) <= 2 and 0 < len(x2.shape) <= 2, 'x1 and x2 must be 1D or 2D'
-        x1_mat = torch.atleast_2d(x1)
-        x2_mat = torch.atleast_2d(x2)
-        assert x1_mat.shape[0] == x2_mat.shape[0], 'vector dimensions of x1 and x2 are incompatible'
+        assert len(x1.shape) == 2 and len(x2.shape) == 2, 'x1 and x2 must be 2D tensors'
+        assert x1.shape[1] == x2.shape[1], 'vector dimensions of x1 and x2 are incompatible'
 
         if not diag:
-            x1_mat = torch.transpose(x1_mat.unsqueeze(2).expand(x1_mat.shape + (x2_mat.shape[1],)), 0, 1)  # [m, d, n]
+            aux_x1 = x1.unsqueeze(1)  # shape [N, 1, D] to broadcast with x2 with shape [M, D]
         else:
-            assert x1_mat.shape[1] == x2_mat.shape[1], 'diag = True requires same dims'
-        # the only thing different for other kernels is the last two lines
-        scalar_form = torch.sum((x1_mat - x2_mat).pow(2), dim=1)  # [m, n]
+            assert x1.shape[0] == x2.shape[0], 'diag = True requires same dims'
+            aux_x1 = x1
+        scalar_form = torch.sum((aux_x1 - x2).pow(2), dim=-1)  # [N, M]
         return torch.exp(-0.5 * scalar_form / self.lengthscale.pow(2))

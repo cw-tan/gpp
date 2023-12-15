@@ -19,11 +19,11 @@ class TestSGPOutputs(unittest.TestCase):
         L = 10
         x_train = L * (2 * torch.rand(500, dtype=torch.float64) - 1)
         self.y_train = func(x_train)
-        self.x_train = torch.atleast_2d(x_train)
+        self.x_train = torch.atleast_2d(x_train).T
         self.x_sparse = self.kernel.remove_duplicates(self.x_train, self.x_train, tol=1e-1)
         # ^ very important to prune inducing points close together for matrices to be
         #   well conditioned and reduce error during triangular solves
-        self.x_test = torch.atleast_2d(L * (2 * torch.rand(1000, dtype=torch.float64) - 1))
+        self.x_test = torch.atleast_2d(L * (2 * torch.rand(1000, dtype=torch.float64) - 1)).T
 
     def test_updates(self):
         Ns = self.x_sparse.shape[1]
@@ -35,10 +35,10 @@ class TestSGPOutputs(unittest.TestCase):
 
                 # load data sequentially
                 SGP2 = SparseGaussianProcess(1, self.kernel, decomp_mode=decomp, sgp_mode=mode)
-                SGP2.update_model(self.x_train[:, :500], self.y_train[:500], self.x_sparse[:, :int(Ns / 2)])
-                SGP2.update_model(self.x_train[:, 500:750], self.y_train[500:750], None)
-                SGP2.update_model(None, None, self.x_sparse[:, int(Ns / 2):int(3 / 4 * Ns)])
-                SGP2.update_model(self.x_train[:, 750:], self.y_train[750:], self.x_sparse[:, int(3 / 4 * Ns):])
+                SGP2.update_model(self.x_train[:500, :], self.y_train[:500], self.x_sparse[:int(Ns / 2), :])
+                SGP2.update_model(self.x_train[500:750, :], self.y_train[500:750], None)
+                SGP2.update_model(None, None, self.x_sparse[int(Ns / 2):int(3 / 4 * Ns), :])
+                SGP2.update_model(self.x_train[750:, :], self.y_train[750:], self.x_sparse[int(3 / 4 * Ns):, :])
 
                 # check if all data loaded is identical
                 assert torch.equal(SGP1.full_descriptors, SGP2.full_descriptors)

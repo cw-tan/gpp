@@ -53,8 +53,8 @@ class SparseGaussianProcess(torch.nn.Module):
         self.kernel = kernel
 
         # SGP dataset and sparse inducing points
-        self.full_descriptors = torch.empty((descriptor_dim, 0), dtype=torch.float64, device=self.device)
-        self.sparse_descriptors = torch.empty((descriptor_dim, 0), dtype=torch.float64, device=self.device)
+        self.full_descriptors = torch.empty((0, descriptor_dim), dtype=torch.float64, device=self.device)
+        self.sparse_descriptors = torch.empty((0, descriptor_dim), dtype=torch.float64, device=self.device)
         self.training_outputs = torch.empty((0,), dtype=torch.float64, device=self.device)
 
         # basic SGP hyperparameters (noise and outputscale)
@@ -100,20 +100,20 @@ class SparseGaussianProcess(torch.nn.Module):
         3. update both full and sparse set - provide x_train, y_train, x_sparse
 
         Args:
-          x_train (torch.Tensor) : d × m tensor where m is the number of x vectors and d is the
-                                   dimensionality of the x descriptor vectors
-          y_train (torch.Tensor) : m-dimensional vector of training outputs corresponding to
+          x_train (torch.Tensor) : N × D tensors where N is the number of training descriptor vectors
+                                   and D is the dimensionality
+          y_train (torch.Tensor) : N-dimensional vector of training outputs corresponding to
                                    the training inputs x_train
-          x_sparse (torch.Tensor): d × m tensor where m is the number of x vectors and d is the
-                                   dimensionality of the x descriptor vectors
+          x_sparse (torch.Tensor): M × D tensors where M is the number of sparse descriptor vectors
+                                   and D is the dimensionality
         """
-        init = (self.full_descriptors.shape[1] == 0)  # no data -> initialize
+        init = (self.full_descriptors.shape[0] == 0)  # no data -> initialize
 
         if init:
             assert x_sparse is not None, 'model is empty, x_sparse required for initialization'
-            self.full_descriptors = torch.cat((self.full_descriptors, x_train), dim=1)
+            self.full_descriptors = torch.cat((self.full_descriptors, x_train), dim=0)
             self.training_outputs = torch.cat((self.training_outputs, y_train))
-            self.sparse_descriptors = torch.cat((self.sparse_descriptors, x_sparse), dim=1)
+            self.sparse_descriptors = torch.cat((self.sparse_descriptors, x_sparse), dim=0)
             # compute and keep covariances matrices without outputscale premultiplied
             self.Ksf = self.kernel(self.sparse_descriptors, self.full_descriptors)
             self.Kss = self.kernel(self.sparse_descriptors, self.sparse_descriptors)
@@ -122,13 +122,13 @@ class SparseGaussianProcess(torch.nn.Module):
             if self.sgp_mode == 'fitc':  # efficient update doesn't work for FITC
                 updated_train, updated_sparse = False, False
                 if x_train is not None:
-                    if x_train.shape[1] != 0:
-                        self.full_descriptors = torch.cat((self.full_descriptors, x_train), dim=1)
+                    if x_train.shape[0] != 0:
+                        self.full_descriptors = torch.cat((self.full_descriptors, x_train), dim=0)
                         self.training_outputs = torch.cat((self.training_outputs, y_train))
                         updated_train = True
                 if x_sparse is not None:
-                    if x_sparse.shape[1] != 0:
-                        self.sparse_descriptors = torch.cat((self.sparse_descriptors, x_sparse), dim=1)
+                    if x_sparse.shape[0] != 0:
+                        self.sparse_descriptors = torch.cat((self.sparse_descriptors, x_sparse), dim=0)
                         updated_sparse = True
                 # compute and keep covariances matrices without outputscale premultiplied
                 if updated_train or updated_sparse:
@@ -138,10 +138,10 @@ class SparseGaussianProcess(torch.nn.Module):
                     self.__update_intermediates()
             else:
                 if x_train is not None:
-                    if x_train.shape[1] != 0:
+                    if x_train.shape[0] != 0:
                         self.__update_full_set(x_train, y_train)
                 if x_sparse is not None:
-                    if x_sparse.shape[1] != 0:
+                    if x_sparse.shape[0] != 0:
                         self.__update_sparse_set(x_sparse)
 
     def __update_intermediates(self):
@@ -182,7 +182,7 @@ class SparseGaussianProcess(torch.nn.Module):
         """
         Update model with N' new full set data points (input and output).
         """
-        self.full_descriptors = torch.cat((self.full_descriptors, torch.atleast_2d(x_train)), dim=1)
+        self.full_descriptors = torch.cat((self.full_descriptors, torch.atleast_2d(x_train)), dim=0)
         self.training_outputs = torch.cat((self.training_outputs, y_train))
 
         # update covariance matrices
@@ -219,7 +219,7 @@ class SparseGaussianProcess(torch.nn.Module):
         Ksf_prev = outputscale * self.Ksf  # required later
         self.Ksf = torch.cat([self.Ksf, Kfsprime.T], dim=0)  # without outputscale
 
-        self.sparse_descriptors = torch.cat((self.sparse_descriptors, x_sparse), dim=1)
+        self.sparse_descriptors = torch.cat((self.sparse_descriptors, x_sparse), dim=0)
 
         # multiply in outputscale
         Kssprime = outputscale * Kssprime
@@ -267,7 +267,7 @@ class SparseGaussianProcess(torch.nn.Module):
         """
         predictions = []
         # handle possibility of inference with uninitialized model
-        if (self.full_descriptors.shape[1] == 0):
+        if (self.full_descriptors.shape[0] == 0):
             if mean_var[0]:
                 mean = torch.zeros(x_test.shape[1], dtype=x_test.dtype, device=self.device)
                 predictions.append(mean)
@@ -310,7 +310,7 @@ class SparseGaussianProcess(torch.nn.Module):
         penalty = torch.sum(torch.log(torch.abs(self.L_Sigma.diag())))
         penalty = penalty - torch.sum(torch.log(torch.abs(self.Lss.diag())))
         penalty = penalty - 0.5 * torch.sum(torch.log(torch.abs(self.Lambda_inv)))
-        size = self.full_descriptors.shape[1] * 0.5 * np.log(2 * np.pi)
+        size = self.full_descriptors.shape[0] * 0.5 * np.log(2 * np.pi)
         if self.sgp_mode == 'vfe':
             noise = self.__constrained_hyperparameter('noise')
             outputscale = self.__constrained_hyperparameter('outputscale')
@@ -405,7 +405,7 @@ class SparseGaussianProcess(torch.nn.Module):
             update (bool)          : whether this call is for a full set update
                                      or an initialization/hyperparameter optimization
         """
-        size = full_set.shape[1]
+        size = full_set.shape[0]
         noise = self.__constrained_hyperparameter('noise')
         match self.sgp_mode:
             case 'sor' | 'dtc' | 'vfe':
