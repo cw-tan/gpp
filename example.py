@@ -1,5 +1,4 @@
 import torch
-import numpy as np
 import matplotlib.pyplot as plt
 
 import os
@@ -7,6 +6,7 @@ import sys
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'source'))
 from sgp import SparseGaussianProcess
 from kernels import SquaredExponentialKernel
+
 
 device = 'cpu'
 # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -23,12 +23,6 @@ x_test = torch.linspace(-L - 1, L + 1, 1000, dtype=torch.float64, device=device)
 kernel = SquaredExponentialKernel(device=device)
 SGP = SparseGaussianProcess(1, kernel, decomp_mode='v', sgp_mode='vfe', init_noise=0.05, device=device)
 
-for n, p in SGP.named_parameters():
-    print(n, p)
-
-print(SGP.device)
-print(SGP.outputscale, SGP.noise)
-
 x_train = L * (2 * torch.rand(10, dtype=torch.float64, device=device) - 1)
 y_train = func(x_train)
 plt.plot(x_train.cpu(), y_train.cpu(), 'ko', label='Training Points')
@@ -37,7 +31,7 @@ x_train = torch.atleast_2d(x_train).T
 x_sparse = kernel.remove_duplicates(x_train, x_train, tol=1e-1)
 SGP.update_model(x_train, y_train, x_sparse)
 
-for i in range(10):
+for i in range(2):
     x_train = L * (2 * torch.rand(10, dtype=torch.float64, device=device) - 1)
     y_train = func(x_train)
     plt.plot(x_train.cpu(), y_train.cpu(), 'ko')
@@ -51,7 +45,6 @@ plt.plot(x_sparse[:, 0].cpu(), torch.full((x_sparse.shape[0], ), -3), 'b^', labe
 
 steps = SGP.optimize_hyperparameters(rtol=1e-4, relax_inducing_points=True, relax_kernel_params=False)
 steps = SGP.optimize_hyperparameters(rtol=1e-4, relax_inducing_points=False, relax_kernel_params=True)
-print('lengthscale', SGP.kernel.lengthscale.item())
 
 x_sparse = SGP.sparse_descriptors
 plt.plot(x_sparse[:, 0].cpu(), torch.full((x_sparse.shape[0], ), -2.5), 'g^', label='Optimized Inducing Points', markersize=15)
